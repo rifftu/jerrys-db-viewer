@@ -31,6 +31,12 @@ struct ConnectionConfig {
     sslmode: SslMode,
 }
 
+impl ConnectionConfig {
+    fn default_dbname(&self) -> &str {
+        self.dbname.as_deref().unwrap_or(&self.user)
+    }
+}
+
 fn default_host() -> String {
     "localhost".into()
 }
@@ -54,7 +60,15 @@ enum SslMode {
 
 #[derive(Default)]
 struct AppState {
-    clients: Mutex<HashMap<String, Arc<Client>>>,
+    /// Keyed by (connection name, database).
+    clients: Mutex<HashMap<(String, String), Arc<Client>>>,
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct Connection {
+    name: String,
+    /// The configured `dbname` (or `user`), used until another database is picked.
+    dbname: String,
 }
 
 #[derive(Serialize)]
@@ -87,9 +101,10 @@ fn load_config() -> Result<Vec<ConnectionConfig>, String> {
     Ok(cfg.connection)
 }
 
-async fn client(state: &AppState, name: &str) -> Result<Arc<Client>, String> {
+async fn client(state: &AppState, name: &str, database: &str) -> Result<Arc<Client>, String> {
+    let key = (name.to_string(), database.to_string());
     let mut clients = state.clients.lock().await;
-    if let Some(c) = clients.get(name) {
+    if let Some(c) = clients.get(&key) {
         if !c.is_closed() {
             return Ok(c.clone());
         }
@@ -103,7 +118,7 @@ async fn client(state: &AppState, name: &str) -> Result<Arc<Client>, String> {
     pg.host(&cfg.host)
         .port(cfg.port)
         .user(&cfg.user)
-        .dbname(cfg.dbname.as_deref().unwrap_or(&cfg.user))
+        .dbname(database)
         .application_name("jerrys-db-viewer")
         .ssl_mode(match cfg.sslmode {
             SslMode::Disable => tokio_postgres::config::SslMode::Disable,
@@ -127,7 +142,7 @@ async fn client(state: &AppState, name: &str) -> Result<Arc<Client>, String> {
     });
 
     let client = Arc::new(client);
-    clients.insert(name.to_string(), client.clone());
+    clients.insert(key, client.clone());
     Ok(client)
 }
 
@@ -176,13 +191,36 @@ fn format_db_error(e: tokio_postgres::Error) -> String {
 }
 
 #[tauri::command]
-fn list_connections() -> Result<Vec<String>, String> {
-    Ok(load_config()?.into_iter().map(|c| c.name).collect())
+fn list_connections() -> Result<Vec<Connection>, String> {
+    Ok(load_config()?
+        .iter()
+        .map(|c| Connection { name: c.name.clone(), dbname: c.default_dbname().to_string() })
+        .collect())
+}
+
+/// Lists databases on the server, queried through the currently selected one.
+#[tauri::command]
+async fn list_databases(
+    state: tauri::State<'_, AppState>,
+    connection: String,
+    database: String,
+) -> Result<Vec<String>, String> {
+    let client = client(&state, &connection, &database).await?;
+    let sets = simple_query(
+        &client,
+        "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate ORDER BY datname",
+    )
+    .await?;
+    Ok(sets.into_iter().flat_map(|s| s.rows).filter_map(|mut r| r.remove(0)).collect())
 }
 
 #[tauri::command]
-async fn list_tables(state: tauri::State<'_, AppState>, connection: String) -> Result<Vec<Table>, String> {
-    let client = client(&state, &connection).await?;
+async fn list_tables(
+    state: tauri::State<'_, AppState>,
+    connection: String,
+    database: String,
+) -> Result<Vec<Table>, String> {
+    let client = client(&state, &connection, &database).await?;
     let sets = simple_query(
         &client,
         "SELECT table_schema, table_name FROM information_schema.tables \
@@ -204,9 +242,10 @@ async fn list_tables(state: tauri::State<'_, AppState>, connection: String) -> R
 async fn run_query(
     state: tauri::State<'_, AppState>,
     connection: String,
+    database: String,
     sql: String,
 ) -> Result<Vec<ResultSet>, String> {
-    let client = client(&state, &connection).await?;
+    let client = client(&state, &connection, &database).await?;
     simple_query(&client, &sql).await
 }
 
@@ -230,9 +269,10 @@ mod tests {
         .unwrap();
         std::env::set_var("DB_VIEWER_CONFIG", &path);
 
-        assert_eq!(list_connections().unwrap(), vec!["t"]);
+        // dbname defaults to user.
+        assert_eq!(list_connections().unwrap(), vec![Connection { name: "t".into(), dbname: "postgres".into() }]);
         let state = AppState::default();
-        let c = client(&state, "t").await.unwrap();
+        let c = client(&state, "t", "postgres").await.unwrap();
         let sets = simple_query(
             &c,
             "DROP TABLE IF EXISTS dbv_t; CREATE TABLE dbv_t (id int, name text); \
@@ -251,7 +291,15 @@ mod tests {
         let err = simple_query(&c, "SELECT * FROM nope").await.unwrap_err();
         assert!(err.contains("does not exist"), "{err}");
         // Same client is reused after an error.
-        assert!(Arc::ptr_eq(&c, &client(&state, "t").await.unwrap()));
+        assert!(Arc::ptr_eq(&c, &client(&state, "t", "postgres").await.unwrap()));
+
+        // Picking another database opens a separate client connected to it.
+        simple_query(&c, "DROP DATABASE IF EXISTS dbv_other").await.unwrap();
+        simple_query(&c, "CREATE DATABASE dbv_other").await.unwrap();
+        let other = client(&state, "t", "dbv_other").await.unwrap();
+        assert!(!Arc::ptr_eq(&c, &other));
+        let sets = simple_query(&other, "SELECT current_database()").await.unwrap();
+        assert_eq!(sets[0].rows, vec![vec![Some("dbv_other".into())]]);
     }
 }
 
@@ -259,7 +307,7 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_connections, list_tables, run_query])
+        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, run_query])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

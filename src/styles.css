@@ -42,6 +42,8 @@ body { background: var(--bg); color: var(--fg); }
 
 .sidebar select { margin: 8px; padding: 4px; font: inherit; }
 
+.sidebar select + select { margin-top: 0; }
+
 .tables { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
 
 .tables li {
