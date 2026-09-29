@@ -9,6 +9,8 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
 ## Connections
 
 Connections are config-as-code in a TOML file, see [`connections.example.toml`](connections.example.toml).
+Each entry has the same fields as a `pg_service.conf` service (`host`, `port`, `user`, `dbname`,
+`password`, `sslmode`), with libpq's defaults and `sslmode` meanings.
 
 The app reads `$DB_VIEWER_CONFIG` if set, otherwise `~/.config/jerrys-db-viewer/connections.toml`.
 

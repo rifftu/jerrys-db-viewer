@@ -12,17 +12,44 @@ struct ConfigFile {
     connection: Vec<ConnectionConfig>,
 }
 
+/// Same fields and defaults as a libpq service (`pg_service.conf`) entry.
 #[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
 struct ConnectionConfig {
     name: String,
-    /// libpq-style URL or key=value string, e.g. `postgres://user@localhost:5432/db`.
-    url: String,
-    /// Kept separate from `url` so it doesn't need URL-escaping. Empty means none.
+    #[serde(default = "default_host")]
+    host: String,
+    #[serde(default = "default_port")]
+    port: u16,
+    user: String,
+    /// Defaults to `user`, like libpq.
+    dbname: Option<String>,
+    /// Empty means none.
     #[serde(default)]
     password: String,
-    /// Skip TLS certificate/hostname verification (self-signed certs, etc).
     #[serde(default)]
-    tls_insecure: bool,
+    sslmode: SslMode,
+}
+
+fn default_host() -> String {
+    "localhost".into()
+}
+
+fn default_port() -> u16 {
+    5432
+}
+
+/// libpq semantics: `prefer`/`require` encrypt without verifying the server
+/// certificate; `verify-ca` checks the chain, `verify-full` also the hostname.
+#[derive(Deserialize, Clone, Copy, Default, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+enum SslMode {
+    Disable,
+    #[default]
+    Prefer,
+    Require,
+    VerifyCa,
+    VerifyFull,
 }
 
 #[derive(Default)]
@@ -72,13 +99,23 @@ async fn client(state: &AppState, name: &str) -> Result<Arc<Client>, String> {
         .into_iter()
         .find(|c| c.name == name)
         .ok_or_else(|| format!("Unknown connection: {name}"))?;
-    let mut pg: tokio_postgres::Config = cfg.url.parse().map_err(|e| format!("Bad url for {name}: {e}"))?;
+    let mut pg = tokio_postgres::Config::new();
+    pg.host(&cfg.host)
+        .port(cfg.port)
+        .user(&cfg.user)
+        .dbname(cfg.dbname.as_deref().unwrap_or(&cfg.user))
+        .application_name("jerrys-db-viewer")
+        .ssl_mode(match cfg.sslmode {
+            SslMode::Disable => tokio_postgres::config::SslMode::Disable,
+            SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
+            _ => tokio_postgres::config::SslMode::Require,
+        });
     if !cfg.password.is_empty() {
         pg.password(&cfg.password);
     }
     let tls = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(cfg.tls_insecure)
-        .danger_accept_invalid_hostnames(cfg.tls_insecure)
+        .danger_accept_invalid_certs(matches!(cfg.sslmode, SslMode::Prefer | SslMode::Require))
+        .danger_accept_invalid_hostnames(cfg.sslmode != SslMode::VerifyFull)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -177,15 +214,20 @@ async fn run_query(
 mod tests {
     use super::*;
 
-    /// Needs a scratch database, e.g. `DB_VIEWER_TEST_URL=postgres://postgres:test@localhost:55432/postgres`.
+    /// Needs a scratch database on localhost with user `postgres`, password `test`,
+    /// listening on `DB_VIEWER_TEST_PORT` (see LESSONS.md).
     #[tokio::test]
     async fn query_roundtrip() {
-        let Ok(url) = std::env::var("DB_VIEWER_TEST_URL") else {
-            eprintln!("DB_VIEWER_TEST_URL not set, skipping");
+        let Ok(port) = std::env::var("DB_VIEWER_TEST_PORT") else {
+            eprintln!("DB_VIEWER_TEST_PORT not set, skipping");
             return;
         };
         let path = std::env::temp_dir().join("db-viewer-test-connections.toml");
-        std::fs::write(&path, format!("[[connection]]\nname = \"t\"\nurl = \"{url}\"\n")).unwrap();
+        std::fs::write(
+            &path,
+            format!("[[connection]]\nname = \"t\"\nport = {port}\nuser = \"postgres\"\npassword = \"test\"\nsslmode = \"disable\"\n"),
+        )
+        .unwrap();
         std::env::set_var("DB_VIEWER_CONFIG", &path);
 
         assert_eq!(list_connections().unwrap(), vec!["t"]);

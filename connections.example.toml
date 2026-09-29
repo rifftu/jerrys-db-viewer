@@ -1,15 +1,26 @@
 # Copy to ~/.config/jerrys-db-viewer/connections.toml
 # (or anywhere, and point DB_VIEWER_CONFIG at it).
 # The file is re-read whenever the app lists connections or opens a new one.
+#
+# Fields mirror a pg_service.conf entry:
+#   host     default "localhost"
+#   port     default 5432
+#   user     required
+#   dbname   default: same as user
+#   password default: none
+#   sslmode  disable | prefer (default) | require | verify-ca | verify-full
+#            prefer/require encrypt without verifying the certificate, like libpq.
 
 [[connection]]
 name = "local"
-url = "postgres://postgres@localhost:5432/postgres"
+user = "postgres"
+dbname = "postgres"
 
 [[connection]]
 name = "staging"
-# libpq URL or key=value string; sslmode defaults to "prefer".
-url = "host=db.example.com port=5432 user=readonly dbname=app sslmode=require"
+host = "db.example.com"
+port = 5432
+user = "readonly"
+dbname = "app"
 password = ""
-# Accept self-signed / unverifiable TLS certificates (what libpq's sslmode=require does).
-tls_insecure = true
+sslmode = "require"
