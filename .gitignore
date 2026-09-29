@@ -4,3 +4,4 @@ src-tauri/target/
 src-tauri/gen/
 connections.toml
 .DS_Store
+.claude/worktrees/
