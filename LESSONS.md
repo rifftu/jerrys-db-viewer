@@ -7,5 +7,6 @@
 - The backend integration test is skipped unless `DB_VIEWER_TEST_PORT` points at a scratch database, e.g.
   `docker run -d --rm --name dbviewer-test -e POSTGRES_PASSWORD=test -p 127.0.0.1:55432:5432 postgres:17-alpine`
   then `DB_VIEWER_TEST_PORT=55432 cargo test` in `src-tauri`.
+- Frontend unit tests use Node's built-in runner, no deps: `npm test` (Node 24 runs `.ts` directly; imports need the `.ts` extension, so `*.test.ts` is excluded from `tsc`). `node --test` needs a glob, not a directory.
 - Connection config uses explicit TOML fields rather than a libpq URL/key=value string inside a TOML string; that read as nonstandard.
 - libpq `sslmode=require` encrypts without verifying the certificate, but native-tls verifies by default. Map `prefer`/`require` to `danger_accept_invalid_certs` or cloud DBs fail to connect.

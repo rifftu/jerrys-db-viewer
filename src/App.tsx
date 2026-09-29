@@ -1,5 +1,6 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { tabLabels } from "./tabLabels";
 
 type Connection = { name: string; dbname: string };
 type Selection = { conn: string; db: string };
@@ -8,6 +9,10 @@ type ResultSet = { columns: string[]; rows: (string | null)[][]; affected: numbe
 type Tab = {
   id: number;
   title: string;
+  /** Title is a table name (vs "New tab"). */
+  fromTable: boolean;
+  /** Start time (ms) of the most recent query. */
+  lastRunAt: number | null;
   /** Where this tab's queries run; independent of the sidebar and of other tabs. */
   target: Selection | null;
   sql: string;
@@ -20,9 +25,11 @@ type Tab = {
 const quoteIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
 
 let nextTabId = 1;
-const makeTab = (target: Selection | null, title = "New tab", sql = ""): Tab => ({
+const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
   id: nextTabId++,
-  title,
+  title: table ?? "New tab",
+  fromTable: table !== undefined,
+  lastRunAt: null,
   target,
   sql,
   results: [],
@@ -94,7 +101,7 @@ export default function App() {
       if (!on || !query.trim()) return;
       const id = (runIds.current.get(tabId) ?? 0) + 1;
       runIds.current.set(tabId, id);
-      updateTab(tabId, { busy: true, error: "" });
+      updateTab(tabId, { busy: true, error: "", lastRunAt: Date.now() });
       const start = performance.now();
       let res: ResultSet[] = [];
       let err = "";
@@ -109,6 +116,25 @@ export default function App() {
     [updateTab],
   );
 
+  // Labels depend only on these fields, so recompute when they change — not on every keystroke or result.
+  const labelKey = tabs
+    .map((t) => [t.id, t.title, t.fromTable, t.target?.conn, t.target?.db, t.lastRunAt].join("\u0000"))
+    .join("\u0001");
+  const labels = useMemo(
+    () =>
+      tabLabels(
+        tabs.map((t) => ({
+          id: t.id,
+          title: t.title,
+          fromTable: t.fromTable,
+          conn: t.target?.conn ?? "",
+          db: t.target?.db ?? "",
+          lastRunAt: t.lastRunAt,
+        })),
+      ),
+    [labelKey],
+  );
+
   const setSql = useCallback((id: number, sql: string) => updateTab(id, { sql }), [updateTab]);
 
   function openTable(t: Table, inNewTab: boolean) {
@@ -120,7 +146,7 @@ export default function App() {
       tabId = tab.id;
       setTabs((ts) => [...ts, tab]);
     } else {
-      updateTab(tabId, { target: sel, title: t.name, sql: q });
+      updateTab(tabId, { target: sel, title: t.name, fromTable: true, sql: q });
     }
     setActiveId(tabId);
     run(tabId, sel, q);
@@ -192,7 +218,7 @@ export default function App() {
               title={t.target ? `${t.target.conn} / ${t.target.db}` : undefined}
               onClick={() => setActiveId(t.id)}
             >
-              <span className="tab-title">{t.title}</span>
+              <span className="tab-title">{labels.get(t.id)}</span>
               <button
                 className="tab-close"
                 title="Close tab"
