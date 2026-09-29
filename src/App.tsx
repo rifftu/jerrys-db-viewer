@@ -6,6 +6,7 @@ type Connection = { name: string; dbname: string };
 type Selection = { conn: string; db: string };
 type Table = { schema: string; name: string };
 type ResultSet = { columns: string[]; rows: (string | null)[][]; affected: number };
+type FkTarget = { schema: string; table: string; column: string };
 type Tab = {
   id: number;
   title: string;
@@ -20,9 +21,14 @@ type Tab = {
   error: string;
   busy: boolean;
   elapsed: number | null;
+  /** Run that produced `results`. */
+  resultsRun: number;
+  /** FK target per result column, from the run it describes; arrives independently of results. */
+  fks: { run: number; cols: (FkTarget | null)[] } | null;
 };
 
 const quoteIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
+const quoteLiteral = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 let nextTabId = 1;
 const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
@@ -36,6 +42,8 @@ const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
   error: "",
   busy: false,
   elapsed: null,
+  resultsRun: 0,
+  fks: null,
 });
 
 export default function App() {
@@ -102,6 +110,11 @@ export default function App() {
       const id = (runIds.current.get(tabId) ?? 0) + 1;
       runIds.current.set(tabId, id);
       updateTab(tabId, { busy: true, error: "", lastRunAt: Date.now() });
+      // Fired alongside the query (not awaited): the backend pipelines both on one
+      // connection, and results render without waiting for FK info.
+      invoke<(FkTarget | null)[] | null>("describe_columns", { connection: on.conn, database: on.db, sql: query })
+        .then((cols) => runIds.current.get(tabId) === id && updateTab(tabId, { fks: cols ? { run: id, cols } : null }))
+        .catch(() => {});
       const start = performance.now();
       let res: ResultSet[] = [];
       let err = "";
@@ -111,9 +124,26 @@ export default function App() {
         err = String(e);
       }
       if (runIds.current.get(tabId) !== id) return;
-      updateTab(tabId, { results: res, error: err, elapsed: Math.round(performance.now() - start), busy: false });
+      updateTab(tabId, {
+        results: res,
+        resultsRun: id,
+        error: err,
+        elapsed: Math.round(performance.now() - start),
+        busy: false,
+      });
     },
     [updateTab],
+  );
+
+  const openFk = useCallback(
+    (on: Selection, fk: FkTarget, value: string) => {
+      const q = `SELECT * FROM ${quoteIdent(fk.schema)}.${quoteIdent(fk.table)} WHERE ${quoteIdent(fk.column)} = ${quoteLiteral(value)} LIMIT 1000`;
+      const tab = makeTab(on, fk.table, q);
+      setTabs((ts) => [...ts, tab]);
+      setActiveId(tab.id);
+      run(tab.id, on, q);
+    },
+    [run],
   );
 
   // Labels depend only on these fields, so recompute when they change — not on every keystroke or result.
@@ -237,7 +267,7 @@ export default function App() {
         </div>
         {/* Background tabs stay mounted (hidden) so switching is instant and keeps scroll position. */}
         {tabs.map((t) => (
-          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} />
+          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} onOpenFk={openFk} />
         ))}
       </main>
     </div>
@@ -249,11 +279,14 @@ type TabPaneProps = {
   active: boolean;
   onSqlChange: (id: number, sql: string) => void;
   onRun: (id: number, on: Selection | null, sql: string) => void;
+  onOpenFk: (on: Selection, fk: FkTarget, value: string) => void;
 };
 
 // Memoized so typing in or running one tab doesn't re-render other tabs' result tables.
-const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun }: TabPaneProps) {
+const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenFk }: TabPaneProps) {
   const { target, results, error, busy, elapsed } = tab;
+  // Only trust FK info describing the run whose results are shown; describe works on single statements.
+  const colFks = tab.fks && tab.fks.run === tab.resultsRun && results.length === 1 ? tab.fks.cols : null;
   return (
     <div className="pane" hidden={!active}>
       <textarea
@@ -288,11 +321,29 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun }: TabPa
               <tbody>
                 {r.rows.map((row, j) => (
                   <tr key={j}>
-                    {row.map((v, k) => (
-                      <td key={k} className={v === null ? "null" : undefined}>
-                        {v ?? "NULL"}
-                      </td>
-                    ))}
+                    {row.map((v, k) => {
+                      const fk = colFks?.[k];
+                      if (v === null) {
+                        return (
+                          <td key={k} className="null">
+                            NULL
+                          </td>
+                        );
+                      }
+                      if (fk && target) {
+                        return (
+                          <td
+                            key={k}
+                            className="fk"
+                            title={`⌘-click: ${fk.table}.${fk.column} = ${v}`}
+                            onClick={(e) => (e.metaKey || e.ctrlKey) && onOpenFk(target, fk, v)}
+                          >
+                            {v}
+                          </td>
+                        );
+                      }
+                      return <td key={k}>{v}</td>;
+                    })}
                   </tr>
                 ))}
               </tbody>

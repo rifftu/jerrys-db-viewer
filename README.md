@@ -5,6 +5,8 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
 - Pick a connection, then a database (defaults to the configured `dbname`), see its tables.
   Double-click a table to `SELECT * … LIMIT 1000` in the current tab, ⌘-click to open it in a new tab.
 - Tabs (`+` / `×`) each keep their own connection, database, SQL and results.
+- Foreign-key values are underlined; ⌘-click one to open the referenced row(s) in a new tab.
+  FKs are cached per database when the sidebar lists its tables (re-select the database to refresh).
 - Type SQL, press **Enter** to run it (**Shift+Enter** for a newline).
 - Results are a plain, non-interactive table. All values are shown as text (simple query protocol).
 

@@ -136,3 +136,5 @@ th, td {
 th { position: sticky; top: 0; background: var(--panel); }
 
 td.null { color: var(--muted); font-style: italic; }
+
+td.fk { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }

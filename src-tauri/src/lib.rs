@@ -58,10 +58,23 @@ enum SslMode {
     VerifyFull,
 }
 
+/// Single-column foreign keys of one database: (table oid, column number) -> referenced column.
+type FkMap = HashMap<(u32, i16), FkTarget>;
+
 #[derive(Default)]
 struct AppState {
     /// Keyed by (connection name, database).
     clients: Mutex<HashMap<(String, String), Arc<Client>>>,
+    /// Keyed by (connection name, database). Refreshed whenever the sidebar lists that
+    /// database's tables; kept across reconnects, dropped when the app exits.
+    fks: std::sync::Mutex<HashMap<(String, String), Arc<FkMap>>>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq)]
+struct FkTarget {
+    schema: String,
+    table: String,
+    column: String,
 }
 
 #[derive(Serialize, Debug, PartialEq)]
@@ -214,21 +227,47 @@ async fn list_databases(
     Ok(sets.into_iter().flat_map(|s| s.rows).filter_map(|mut r| r.remove(0)).collect())
 }
 
-#[tauri::command]
-async fn list_tables(
-    state: tauri::State<'_, AppState>,
-    connection: String,
-    database: String,
-) -> Result<Vec<Table>, String> {
-    let client = client(&state, &connection, &database).await?;
-    let sets = simple_query(
-        &client,
-        "SELECT table_schema, table_name FROM information_schema.tables \
-         WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
-         ORDER BY table_schema <> 'public', table_schema, table_name",
-    )
-    .await?;
-    Ok(sets
+const FK_SQL: &str = "SELECT c.conrelid, c.conkey[1], n.nspname, t.relname, a.attname \
+     FROM pg_constraint c \
+     JOIN pg_class t ON t.oid = c.confrelid \
+     JOIN pg_namespace n ON n.oid = t.relnamespace \
+     JOIN pg_attribute a ON a.attrelid = c.confrelid AND a.attnum = c.confkey[1] \
+     WHERE c.contype = 'f' AND cardinality(c.conkey) = 1";
+
+fn parse_fks(sets: Vec<ResultSet>) -> FkMap {
+    let mut map = FkMap::new();
+    for r in sets.into_iter().flat_map(|s| s.rows) {
+        let (Some(Some(rel)), Some(Some(att))) = (r[0].as_ref().map(|v| v.parse().ok()), r[1].as_ref().map(|v| v.parse().ok())) else {
+            continue;
+        };
+        let text = |i: usize| r[i].clone().unwrap_or_default();
+        // A column with several FKs keeps the first.
+        map.entry((rel, att)).or_insert(FkTarget { schema: text(2), table: text(3), column: text(4) });
+    }
+    map
+}
+
+/// Lists tables and, pipelined on the same connection, refreshes the database's FK cache.
+async fn tables(state: &AppState, connection: &str, database: &str) -> Result<Vec<Table>, String> {
+    let client = client(state, connection, database).await?;
+    let (tables, fks) = tokio::join!(
+        simple_query(
+            &client,
+            "SELECT table_schema, table_name FROM information_schema.tables \
+             WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+             ORDER BY table_schema <> 'public', table_schema, table_name",
+        ),
+        simple_query(&client, FK_SQL),
+    );
+    // An FK lookup failure just means no links; keep any previous cache.
+    if let Ok(fks) = fks {
+        state
+            .fks
+            .lock()
+            .unwrap()
+            .insert((connection.to_string(), database.to_string()), Arc::new(parse_fks(fks)));
+    }
+    Ok(tables?
         .into_iter()
         .flat_map(|s| s.rows)
         .map(|r| Table {
@@ -236,6 +275,40 @@ async fn list_tables(
             name: r[1].clone().unwrap_or_default(),
         })
         .collect())
+}
+
+#[tauri::command]
+async fn list_tables(
+    state: tauri::State<'_, AppState>,
+    connection: String,
+    database: String,
+) -> Result<Vec<Table>, String> {
+    tables(&state, &connection, &database).await
+}
+
+/// For each output column of `sql`, the FK it reads from (if any). Uses a server-side
+/// describe (parse only, nothing is executed) plus the cached FK map. `None` when the SQL
+/// can't be described (e.g. several statements) or the database's FKs aren't cached.
+async fn describe(state: &AppState, connection: &str, database: &str, sql: &str) -> Option<Vec<Option<FkTarget>>> {
+    let fks = state.fks.lock().unwrap().get(&(connection.to_string(), database.to_string())).cloned()?;
+    let client = client(state, connection, database).await.ok()?;
+    let stmt = client.prepare(sql).await.ok()?;
+    Some(
+        stmt.columns()
+            .iter()
+            .map(|c| fks.get(&(c.table_oid()?, c.column_id()?)).cloned())
+            .collect(),
+    )
+}
+
+#[tauri::command]
+async fn describe_columns(
+    state: tauri::State<'_, AppState>,
+    connection: String,
+    database: String,
+    sql: String,
+) -> Result<Option<Vec<Option<FkTarget>>>, String> {
+    Ok(describe(&state, &connection, &database, &sql).await)
 }
 
 #[tauri::command]
@@ -293,6 +366,30 @@ mod tests {
         // Same client is reused after an error.
         assert!(Arc::ptr_eq(&c, &client(&state, "t", "postgres").await.unwrap()));
 
+        // FK links: cache is filled by listing tables, then describe maps result columns to it.
+        simple_query(
+            &c,
+            "DROP TABLE IF EXISTS dbv_child, dbv_parent; DROP TYPE IF EXISTS dbv_mood; \
+             CREATE TYPE dbv_mood AS ENUM ('ok'); \
+             CREATE TABLE dbv_parent (pid int PRIMARY KEY, label text); \
+             CREATE TABLE dbv_child (id int, parent_id int REFERENCES dbv_parent (pid), mood dbv_mood)",
+        )
+        .await
+        .unwrap();
+        assert_eq!(describe(&state, "t", "postgres", "SELECT * FROM dbv_child").await, None, "no cache yet");
+        tables(&state, "t", "postgres").await.unwrap();
+        let parent = Some(FkTarget { schema: "public".into(), table: "dbv_parent".into(), column: "pid".into() });
+        assert_eq!(
+            describe(&state, "t", "postgres", "SELECT * FROM dbv_child").await,
+            Some(vec![None, parent.clone(), None]),
+            "custom enum column still describes"
+        );
+        assert_eq!(
+            describe(&state, "t", "postgres", "SELECT ch.parent_id AS p, 1 AS one FROM dbv_child ch").await,
+            Some(vec![parent, None])
+        );
+        assert_eq!(describe(&state, "t", "postgres", "SELECT 1; SELECT 2").await, None);
+
         // Picking another database opens a separate client connected to it.
         simple_query(&c, "DROP DATABASE IF EXISTS dbv_other").await.unwrap();
         simple_query(&c, "CREATE DATABASE dbv_other").await.unwrap();
@@ -307,7 +404,7 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, run_query])
+        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, run_query])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
