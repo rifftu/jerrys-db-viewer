@@ -1,0 +1,16 @@
+# Copy to ~/.config/jerrys-db-viewer/connections.toml
+# (or anywhere, and point DB_VIEWER_CONFIG at it).
+# The file is re-read whenever the app lists connections or opens a new one.
+
+[[connection]]
+name = "local"
+url = "postgres://postgres@localhost:5432/postgres"
+
+[[connection]]
+name = "staging"
+# libpq URL or key=value string; sslmode defaults to "prefer".
+url = "host=db.example.com port=5432 user=readonly dbname=app sslmode=require"
+# Read the password from an env var rather than writing it here.
+password_env = "STAGING_PG_PASSWORD"
+# Accept self-signed / unverifiable TLS certificates.
+tls_insecure = true
