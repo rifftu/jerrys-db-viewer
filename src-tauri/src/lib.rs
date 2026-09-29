@@ -17,8 +17,9 @@ struct ConnectionConfig {
     name: String,
     /// libpq-style URL or key=value string, e.g. `postgres://user@localhost:5432/db`.
     url: String,
-    /// Read the password from this environment variable instead of putting it in `url`.
-    password_env: Option<String>,
+    /// Kept separate from `url` so it doesn't need URL-escaping. Empty means none.
+    #[serde(default)]
+    password: String,
     /// Skip TLS certificate/hostname verification (self-signed certs, etc).
     #[serde(default)]
     tls_insecure: bool,
@@ -72,8 +73,8 @@ async fn client(state: &AppState, name: &str) -> Result<Arc<Client>, String> {
         .find(|c| c.name == name)
         .ok_or_else(|| format!("Unknown connection: {name}"))?;
     let mut pg: tokio_postgres::Config = cfg.url.parse().map_err(|e| format!("Bad url for {name}: {e}"))?;
-    if let Some(var) = &cfg.password_env {
-        pg.password(std::env::var(var).map_err(|_| format!("Env var {var} is not set"))?);
+    if !cfg.password.is_empty() {
+        pg.password(&cfg.password);
     }
     let tls = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(cfg.tls_insecure)

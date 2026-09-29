@@ -12,8 +12,7 @@ Connections are config-as-code in a TOML file, see [`connections.example.toml`](
 
 The app reads `$DB_VIEWER_CONFIG` if set, otherwise `~/.config/jerrys-db-viewer/connections.toml`.
 
-Passwords can go in `url` or come from an env var via `password_env`. Env vars are only visible
-when the app is launched from a shell (e.g. `npm run tauri dev`), not from Finder.
+Passwords go in the `password` field of each connection. Keep the config file outside the repo.
 
 ## Development
 
