@@ -133,7 +133,17 @@ th, td {
   text-overflow: ellipsis;
 }
 
-th { position: sticky; top: 0; background: var(--panel); }
+th { position: sticky; top: 0; background: var(--panel); user-select: none; }
+
+/* Drag handle on each header's right edge (th clips overflow, so it sits just inside). */
+.col-resize { position: absolute; top: 0; right: 0; width: 5px; height: 100%; cursor: col-resize; }
+
+.col-resize:hover { background: var(--border); }
+
+/* After the first resize: explicit widths, no 400px cap. */
+table.sized { table-layout: fixed; }
+
+table.sized th, table.sized td { max-width: none; }
 
 td.null { color: var(--muted); font-style: italic; }
 

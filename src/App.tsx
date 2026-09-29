@@ -1,12 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { tabLabels } from "./tabLabels";
+import { ResultTable } from "./ResultTable";
+import type { FkTarget, ResultSet, Selection } from "./types";
 
 type Connection = { name: string; dbname: string };
-type Selection = { conn: string; db: string };
 type Table = { schema: string; name: string };
-type ResultSet = { columns: string[]; rows: (string | null)[][]; affected: number };
-type FkTarget = { schema: string; table: string; column: string };
 type Tab = {
   id: number;
   title: string;
@@ -310,44 +309,8 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
         {error && <pre className="error">{error}</pre>}
         {results.map((r, i) =>
           r.columns.length ? (
-            <table key={i}>
-              <thead>
-                <tr>
-                  {r.columns.map((c, j) => (
-                    <th key={j}>{c}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {r.rows.map((row, j) => (
-                  <tr key={j}>
-                    {row.map((v, k) => {
-                      const fk = colFks?.[k];
-                      if (v === null) {
-                        return (
-                          <td key={k} className="null">
-                            NULL
-                          </td>
-                        );
-                      }
-                      if (fk && target) {
-                        return (
-                          <td
-                            key={k}
-                            className="fk"
-                            title={`⌘-click: ${fk.table}.${fk.column} = ${v}`}
-                            onClick={(e) => (e.metaKey || e.ctrlKey) && onOpenFk(target, fk, v)}
-                          >
-                            {v}
-                          </td>
-                        );
-                      }
-                      return <td key={k}>{v}</td>;
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            // Keyed by run so a re-query starts with fresh (auto) column widths.
+            <ResultTable key={`${tab.resultsRun}-${i}`} result={r} fks={colFks} target={target} onOpenFk={onOpenFk} />
           ) : (
             <div key={i} className="affected">
               {r.affected} row(s) affected
