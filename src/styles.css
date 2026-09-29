@@ -49,6 +49,7 @@ body { background: var(--bg); color: var(--fg); }
 .tables li {
   padding: 3px 12px;
   cursor: pointer;
+  user-select: none;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -57,6 +58,48 @@ body { background: var(--bg); color: var(--fg); }
 .tables li:hover { background: var(--hover); }
 
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+.tabbar {
+  display: flex;
+  overflow-x: auto;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+  padding: 4px 6px 4px 10px;
+  border-right: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  color: var(--muted);
+}
+
+.tab.active { background: var(--bg); color: var(--fg); }
+
+.tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tab-close, .tab-new {
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+  border-radius: 3px;
+}
+
+.tab-close:hover, .tab-new:hover { background: var(--hover); }
+
+.tab-new { padding: 0 10px; font-size: 16px; color: var(--muted); }
+
+.pane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.pane[hidden] { display: none; }
 
 .sql {
   height: 140px;

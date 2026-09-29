@@ -1,12 +1,35 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type Connection = { name: string; dbname: string };
 type Selection = { conn: string; db: string };
 type Table = { schema: string; name: string };
 type ResultSet = { columns: string[]; rows: (string | null)[][]; affected: number };
+type Tab = {
+  id: number;
+  title: string;
+  /** Where this tab's queries run; independent of the sidebar and of other tabs. */
+  target: Selection | null;
+  sql: string;
+  results: ResultSet[];
+  error: string;
+  busy: boolean;
+  elapsed: number | null;
+};
 
 const quoteIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
+
+let nextTabId = 1;
+const makeTab = (target: Selection | null, title = "New tab", sql = ""): Tab => ({
+  id: nextTabId++,
+  title,
+  target,
+  sql,
+  results: [],
+  error: "",
+  busy: false,
+  elapsed: null,
+});
 
 export default function App() {
   const [connections, setConnections] = useState<Connection[]>([]);
@@ -16,15 +39,15 @@ export default function App() {
   const [databases, setDatabases] = useState<string[]>([]);
   const [tables, setTables] = useState<Table[]>([]);
   const [sidebarError, setSidebarError] = useState("");
-  // SQL pane state. `target` is independent of the sidebar and only moves when a table is opened.
-  const [target, setTarget] = useState<Selection | null>(null);
-  const [sql, setSql] = useState("");
-  const [results, setResults] = useState<ResultSet[]>([]);
-  const [error, setError] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [elapsed, setElapsed] = useState<number | null>(null);
-  // Only the latest run may write results, so a slow earlier query can't overwrite a newer one.
-  const runId = useRef(0);
+  const [tabs, setTabs] = useState<Tab[]>(() => [makeTab(null)]);
+  const [activeId, setActiveId] = useState(() => tabs[0].id);
+  // Latest run per tab; only that run may write results, so a slow earlier
+  // query can't overwrite a newer one.
+  const runIds = useRef(new Map<number, number>());
+
+  const updateTab = useCallback((id: number, patch: Partial<Tab>) => {
+    setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  }, []);
 
   useEffect(() => {
     invoke<Connection[]>("list_connections")
@@ -33,7 +56,7 @@ export default function App() {
         if (list.length) {
           const first = { conn: list[0].name, db: list[0].dbname };
           setSel(first);
-          setTarget(first);
+          setTabs((ts) => ts.map((t) => (t.target ? t : { ...t, target: first })));
         }
       })
       .catch((e) => setSidebarError(String(e)));
@@ -66,32 +89,56 @@ export default function App() {
     };
   }, [sel?.conn, sel?.db]);
 
-  async function run(on: Selection | null, query: string) {
-    if (!on || !query.trim()) return;
-    const id = ++runId.current;
-    setBusy(true);
-    setError("");
-    const start = performance.now();
-    let res: ResultSet[] = [];
-    let err = "";
-    try {
-      res = await invoke<ResultSet[]>("run_query", { connection: on.conn, database: on.db, sql: query });
-    } catch (e) {
-      err = String(e);
-    }
-    if (id !== runId.current) return;
-    setResults(res);
-    setError(err);
-    setElapsed(Math.round(performance.now() - start));
-    setBusy(false);
-  }
+  const run = useCallback(
+    async (tabId: number, on: Selection | null, query: string) => {
+      if (!on || !query.trim()) return;
+      const id = (runIds.current.get(tabId) ?? 0) + 1;
+      runIds.current.set(tabId, id);
+      updateTab(tabId, { busy: true, error: "" });
+      const start = performance.now();
+      let res: ResultSet[] = [];
+      let err = "";
+      try {
+        res = await invoke<ResultSet[]>("run_query", { connection: on.conn, database: on.db, sql: query });
+      } catch (e) {
+        err = String(e);
+      }
+      if (runIds.current.get(tabId) !== id) return;
+      updateTab(tabId, { results: res, error: err, elapsed: Math.round(performance.now() - start), busy: false });
+    },
+    [updateTab],
+  );
 
-  function openTable(t: Table) {
+  const setSql = useCallback((id: number, sql: string) => updateTab(id, { sql }), [updateTab]);
+
+  function openTable(t: Table, inNewTab: boolean) {
     if (!sel) return;
     const q = `SELECT * FROM ${quoteIdent(t.schema)}.${quoteIdent(t.name)} LIMIT 1000`;
-    setTarget(sel);
-    setSql(q);
-    run(sel, q);
+    let tabId = activeId;
+    if (inNewTab) {
+      const tab = makeTab(sel, t.name, q);
+      tabId = tab.id;
+      setTabs((ts) => [...ts, tab]);
+    } else {
+      updateTab(tabId, { target: sel, title: t.name, sql: q });
+    }
+    setActiveId(tabId);
+    run(tabId, sel, q);
+  }
+
+  function newTab() {
+    const tab = makeTab(sel);
+    setTabs((ts) => [...ts, tab]);
+    setActiveId(tab.id);
+  }
+
+  function closeTab(id: number) {
+    runIds.current.delete(id);
+    const i = tabs.findIndex((t) => t.id === id);
+    let rest = tabs.filter((t) => t.id !== id);
+    if (!rest.length) rest = [makeTab(sel)];
+    setTabs(rest);
+    if (id === activeId) setActiveId(rest[Math.min(i, rest.length - 1)].id);
   }
 
   return (
@@ -124,62 +171,113 @@ export default function App() {
         {sidebarError && <pre className="error">{sidebarError}</pre>}
         <ul className="tables">
           {tables.map((t) => (
-            <li key={`${t.schema}.${t.name}`} onClick={() => openTable(t)} title={`${t.schema}.${t.name}`}>
+            <li
+              key={`${t.schema}.${t.name}`}
+              title={`${t.schema}.${t.name} — double-click to open, ⌘-click to open in a new tab`}
+              onDoubleClick={(e) => !(e.metaKey || e.ctrlKey) && openTable(t, false)}
+              // detail === 1 so a ⌘-double-click doesn't open two tabs.
+              onClick={(e) => (e.metaKey || e.ctrlKey) && e.detail === 1 && openTable(t, true)}
+            >
               {t.schema === "public" ? t.name : `${t.schema}.${t.name}`}
             </li>
           ))}
         </ul>
       </aside>
       <main className="main">
-        <textarea
-          className="sql"
-          value={sql}
-          placeholder="SQL — Enter to run, Shift+Enter for newline"
-          spellCheck={false}
-          onChange={(e) => setSql(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              run(target, sql);
-            }
-          }}
-        />
-        <div className="status">
-          <span>{target ? `${target.conn} / ${target.db}` : ""}</span>
-          <span>{busy ? "Running…" : elapsed !== null && !error ? `${elapsed} ms` : ""}</span>
+        <div className="tabbar">
+          {tabs.map((t) => (
+            <div
+              key={t.id}
+              className={t.id === activeId ? "tab active" : "tab"}
+              title={t.target ? `${t.target.conn} / ${t.target.db}` : undefined}
+              onClick={() => setActiveId(t.id)}
+            >
+              <span className="tab-title">{t.title}</span>
+              <button
+                className="tab-close"
+                title="Close tab"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  closeTab(t.id);
+                }}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+          <button className="tab-new" title="New tab" onClick={newTab}>
+            +
+          </button>
         </div>
-        <div className="results">
-          {error && <pre className="error">{error}</pre>}
-          {results.map((r, i) =>
-            r.columns.length ? (
-              <table key={i}>
-                <thead>
-                  <tr>
-                    {r.columns.map((c, j) => (
-                      <th key={j}>{c}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {r.rows.map((row, j) => (
-                    <tr key={j}>
-                      {row.map((v, k) => (
-                        <td key={k} className={v === null ? "null" : undefined}>
-                          {v ?? "NULL"}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div key={i} className="affected">
-                {r.affected} row(s) affected
-              </div>
-            ),
-          )}
-        </div>
+        {/* Background tabs stay mounted (hidden) so switching is instant and keeps scroll position. */}
+        {tabs.map((t) => (
+          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} />
+        ))}
       </main>
     </div>
   );
 }
+
+type TabPaneProps = {
+  tab: Tab;
+  active: boolean;
+  onSqlChange: (id: number, sql: string) => void;
+  onRun: (id: number, on: Selection | null, sql: string) => void;
+};
+
+// Memoized so typing in or running one tab doesn't re-render other tabs' result tables.
+const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun }: TabPaneProps) {
+  const { target, results, error, busy, elapsed } = tab;
+  return (
+    <div className="pane" hidden={!active}>
+      <textarea
+        className="sql"
+        value={tab.sql}
+        placeholder="SQL — Enter to run, Shift+Enter for newline"
+        spellCheck={false}
+        onChange={(e) => onSqlChange(tab.id, e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            onRun(tab.id, target, tab.sql);
+          }
+        }}
+      />
+      <div className="status">
+        <span>{target ? `${target.conn} / ${target.db}` : ""}</span>
+        <span>{busy ? "Running…" : elapsed !== null && !error ? `${elapsed} ms` : ""}</span>
+      </div>
+      <div className="results">
+        {error && <pre className="error">{error}</pre>}
+        {results.map((r, i) =>
+          r.columns.length ? (
+            <table key={i}>
+              <thead>
+                <tr>
+                  {r.columns.map((c, j) => (
+                    <th key={j}>{c}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {r.rows.map((row, j) => (
+                  <tr key={j}>
+                    {row.map((v, k) => (
+                      <td key={k} className={v === null ? "null" : undefined}>
+                        {v ?? "NULL"}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          ) : (
+            <div key={i} className="affected">
+              {r.affected} row(s) affected
+            </div>
+          ),
+        )}
+      </div>
+    </div>
+  );
+});
