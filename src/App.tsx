@@ -5,6 +5,7 @@ import { tabLabels } from "./tabLabels";
 import { ResultTable } from "./ResultTable";
 import { CellDialog, type CellDialogHandle } from "./CellDialog";
 import type { FkTarget, ResultSet, Selection } from "./types";
+import { quoteIdent, quoteLiteral } from "./sql";
 
 type Connection = { name: string; dbname: string };
 type Table = { schema: string; name: string };
@@ -28,11 +29,8 @@ type Tab = {
   fks: { run: number; cols: (FkTarget | null)[] } | null;
 };
 
-const quoteIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
 /** Row limit for generated queries (opening a table, following an FK). */
 const DEFAULT_LIMIT = 420;
-
-const quoteLiteral = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 let nextTabId = 1;
 const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
@@ -320,9 +318,26 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
   const { target, results, error, busy, elapsed } = tab;
   // Only trust FK info describing the run whose results are shown; describe works on single statements.
   const colFks = tab.fks && tab.fks.run === tab.resultsRun && results.length === 1 ? tab.fks.cols : null;
+  const sqlRef = useRef<HTMLTextAreaElement>(null);
+  // Option-click insert: only while this tab's SQL box has focus. Returns whether it inserted,
+  // so the caller knows to cancel the mousedown (which keeps focus and the cursor here).
+  const insertSql = useCallback(
+    (text: string) => {
+      const ta = sqlRef.current;
+      if (!ta || document.activeElement !== ta) return false;
+      // insertText keeps native undo and fires input -> onChange; fallback if unsupported.
+      if (!document.execCommand("insertText", false, text)) {
+        ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end");
+        onSqlChange(tab.id, ta.value);
+      }
+      return true;
+    },
+    [tab.id, onSqlChange],
+  );
   return (
     <div className="pane" hidden={!active}>
       <textarea
+        ref={sqlRef}
         className="sql"
         rows={1}
         value={tab.sql}
@@ -345,7 +360,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
         {results.map((r, i) =>
           r.columns.length ? (
             // Keyed by run so a re-query starts with fresh (auto) column widths.
-            <ResultTable key={`${tab.resultsRun}-${i}`} result={r} fks={colFks} target={target} onOpenFk={onOpenFk} onInspect={onInspect} />
+            <ResultTable key={`${tab.resultsRun}-${i}`} result={r} fks={colFks} target={target} onOpenFk={onOpenFk} onInspect={onInspect} onInsert={insertSql} />
           ) : (
             <div key={i} className="affected">
               {r.affected} row(s) affected

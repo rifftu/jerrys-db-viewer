@@ -16,5 +16,6 @@
 - To count React commits in a browser test, install a stub `__REACT_DEVTOOLS_GLOBAL_HOOK__` with `onCommitFiberRoot` via chrome-devtools `navigate_page` `initScript` (runs before app scripts; also a clean place for the Tauri `invoke` mock).
 - Text overflow is `clip` app-wide (user preference), not `ellipsis`.
 - Result-cell interactions go through delegated listeners on `<table>` and `cellAt()` in `ResultTable.tsx` (row/col via `sectionRowIndex`/`cellIndex`); add new cell features there, not as per-cell handlers. Revisit if rows get virtualized, reordered or hidden.
+- To act on a click without stealing focus from the SQL box, `preventDefault()` the `mousedown` (not `pointerdown`, which doesn't stop the focus change). Insert with `document.execCommand("insertText")` so native undo works and React's onChange fires; fall back to `setRangeText` + manual state update.
 - Connection config uses explicit TOML fields rather than a libpq URL/key=value string inside a TOML string; that read as nonstandard.
 - libpq `sslmode=require` encrypts without verifying the certificate, but native-tls verifies by default. Map `prefer`/`require` to `danger_accept_invalid_certs` or cloud DBs fail to connect.

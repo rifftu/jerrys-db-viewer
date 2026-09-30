@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { FkTarget, ResultSet, Selection } from "./types";
+import { quoteIdent, sqlValue } from "./sql";
 
 type Props = {
   result: ResultSet;
@@ -9,6 +10,8 @@ type Props = {
   onOpenFk: (on: Selection, fk: FkTarget, value: string) => void;
   /** Long-press on a cell: show its value (as displayed). */
   onInspect: (value: string) => void;
+  /** Option-click: insert text at the SQL cursor; false if the SQL box isn't focused. */
+  onInsert: (text: string) => boolean;
 };
 
 /** A data cell resolved from a DOM event target. */
@@ -34,7 +37,7 @@ function charsWidth(el: HTMLElement, n: number): number {
  * width as its default and switches the table to fixed layout. Widths are local state, so a
  * re-query (which remounts this component) starts from auto again.
  */
-export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props) {
+export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert }: Props) {
   const tableRef = useRef<HTMLTableElement>(null);
   const press = useRef<{ timer: number; x: number; y: number } | null>(null);
 
@@ -54,6 +57,22 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props)
     return { row, col, value, fk: fks?.[col] ?? null };
   }
 
+  /** Column index of the header under an event target. */
+  function headerAt(target: EventTarget): number | null {
+    const th = (target as HTMLElement).closest?.("thead th") as HTMLTableCellElement | null;
+    return th && tableRef.current?.contains(th) ? th.cellIndex : null;
+  }
+
+  // Option-click inserts "column" / 'value' / NULL at the SQL cursor. Handled on mousedown:
+  // cancelling it is what keeps focus (and the cursor) in the SQL box.
+  function onMouseDown(e: ReactMouseEvent<HTMLTableElement>) {
+    if (!e.altKey || e.button !== 0) return;
+    const col = headerAt(e.target);
+    const cell = col === null ? cellAt(e.target) : null;
+    const text = col !== null ? quoteIdent(result.columns[col]) : cell ? sqlValue(cell.value) : null;
+    if (text !== null && onInsert(text)) e.preventDefault();
+  }
+
   function onClick(e: ReactMouseEvent<HTMLTableElement>) {
     if (!(e.metaKey || e.ctrlKey)) return;
     const cell = cellAt(e.target);
@@ -68,7 +87,7 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props)
 
   function startPress(e: ReactPointerEvent<HTMLTableElement>) {
     cancelPress();
-    if (e.button !== 0) return;
+    if (e.button !== 0 || e.altKey) return;
     const cell = cellAt(e.target);
     if (!cell) return;
     press.current = {
@@ -156,6 +175,7 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props)
   return (
     <table
       ref={tableRef}
+      onMouseDown={onMouseDown}
       onClick={onClick}
       onPointerDown={startPress}
       onPointerMove={movePress}
