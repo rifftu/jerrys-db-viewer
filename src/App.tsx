@@ -28,6 +28,9 @@ type Tab = {
 };
 
 const quoteIdent = (s: string) => `"${s.replace(/"/g, '""')}"`;
+/** Row limit for generated queries (opening a table, following an FK). */
+const DEFAULT_LIMIT = 420;
+
 const quoteLiteral = (s: string) => `'${s.replace(/'/g, "''")}'`;
 
 let nextTabId = 1;
@@ -138,7 +141,7 @@ export default function App() {
 
   const openFk = useCallback(
     (on: Selection, fk: FkTarget, value: string) => {
-      const q = `SELECT * FROM ${quoteIdent(fk.schema)}.${quoteIdent(fk.table)} WHERE ${quoteIdent(fk.column)} = ${quoteLiteral(value)} LIMIT 1000`;
+      const q = `SELECT * FROM ${quoteIdent(fk.schema)}.${quoteIdent(fk.table)} WHERE ${quoteIdent(fk.column)} = ${quoteLiteral(value)} LIMIT ${DEFAULT_LIMIT}`;
       const tab = makeTab(on, fk.table, q);
       setTabs((ts) => [...ts, tab]);
       setActiveId(tab.id);
@@ -170,7 +173,7 @@ export default function App() {
 
   function openTable(t: Table, inNewTab: boolean) {
     if (!sel) return;
-    const q = `SELECT * FROM ${quoteIdent(t.schema)}.${quoteIdent(t.name)} LIMIT 1000`;
+    const q = `SELECT * FROM ${quoteIdent(t.schema)}.${quoteIdent(t.name)} LIMIT ${DEFAULT_LIMIT}`;
     let tabId = activeId;
     if (inNewTab) {
       const tab = makeTab(sel, t.name, q);
