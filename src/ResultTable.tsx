@@ -15,7 +15,7 @@ type Props = {
 };
 
 /** A data cell resolved from a DOM event target. */
-type Cell = { row: number; col: number; value: string | null; fk: FkTarget | null };
+type Cell = { row: number; col: number; value: string | null; fk: FkTarget | null; td: HTMLTableCellElement };
 
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 4;
@@ -54,7 +54,23 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert
     const col = td.cellIndex;
     const value = result.rows[row]?.[col];
     if (value === undefined) return null;
-    return { row, col, value, fk: fks?.[col] ?? null };
+    return { row, col, value, fk: fks?.[col] ?? null, td };
+  }
+
+  /**
+   * The selected cell, for selection-aware features to read. Kept in a ref and shown by
+   * toggling data-sel on the cell, its <tr> and its <col> (CSS tints them), so selecting
+   * never re-renders rows. data-* rather than classes: React rewrites className on some
+   * cells (e.g. when FK info arrives) but leaves unmanaged attributes alone.
+   */
+  const selected = useRef<{ cell: Cell; marked: HTMLElement[] } | null>(null);
+
+  function select(cell: Cell) {
+    for (const el of selected.current?.marked ?? []) delete el.dataset.sel;
+    const col = tableRef.current?.querySelector("colgroup")?.children[cell.col] as HTMLElement | undefined;
+    const marked = [cell.td, cell.td.parentElement as HTMLElement, ...(col ? [col] : [])];
+    for (const el of marked) el.dataset.sel = "";
+    selected.current = { cell, marked };
   }
 
   /** Column index of the header under an event target. */
@@ -74,9 +90,10 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert
   }
 
   function onClick(e: ReactMouseEvent<HTMLTableElement>) {
-    if (!(e.metaKey || e.ctrlKey)) return;
     const cell = cellAt(e.target);
-    if (cell?.fk && cell.value !== null && target) onOpenFk(target, cell.fk, cell.value);
+    if (!cell) return;
+    select(cell);
+    if ((e.metaKey || e.ctrlKey) && cell.fk && cell.value !== null && target) onOpenFk(target, cell.fk, cell.value);
   }
 
   // Long press: show the value as displayed.
@@ -185,13 +202,12 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert
       className={widths ? "sized" : undefined}
       style={widths ? { width: widths.reduce((a, b) => a + b, 0) } : undefined}
     >
-      {widths && (
-        <colgroup>
-          {widths.map((w, i) => (
-            <col key={i} style={{ width: w }} />
-          ))}
-        </colgroup>
-      )}
+      {/* Always rendered: <col>s carry the selected-column tint; widths only once resized. */}
+      <colgroup>
+        {result.columns.map((_, i) => (
+          <col key={i} style={widths ? { width: widths[i] } : undefined} />
+        ))}
+      </colgroup>
       <thead>
         <tr>
           {result.columns.map((c, i) => (

@@ -207,3 +207,9 @@ td.fk { text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
 }
 
 .cell-dialog-footer button:hover { background: var(--hover); }
+
+/* Selected cell and its row/column mates: tints of the system selection color (follows the
+   macOS accent color and light/dark). Painted col < tr < td, so the cell wins where they cross. */
+col[data-sel], tr[data-sel] { background: color-mix(in srgb, Highlight 15%, transparent); }
+
+td[data-sel] { background: color-mix(in srgb, Highlight 45%, transparent); }
