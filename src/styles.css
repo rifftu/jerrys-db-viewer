@@ -32,13 +32,24 @@ body { background: var(--bg); color: var(--fg); }
 .app { display: flex; height: 100%; }
 
 .sidebar {
-  width: 240px;
+  /* Set directly on .app by the divider drag (no React state, so nothing re-renders). */
+  width: var(--sidebar-w, 240px);
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border);
   background: var(--panel);
 }
+
+/* 5px hit area drawn as a 1px line; replaces the sidebar's right border. */
+.divider {
+  flex: 0 0 5px;
+  margin: 0 -2px;
+  z-index: 1;
+  cursor: col-resize;
+  background: linear-gradient(to right, transparent 2px, var(--border) 2px, var(--border) 3px, transparent 3px);
+}
+
+.divider:hover { background: var(--border); }
 
 .sidebar select { margin: 8px; padding: 4px; font: inherit; }
 
@@ -52,7 +63,7 @@ body { background: var(--bg); color: var(--fg); }
   user-select: none;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
 }
 
 .tables li:hover { background: var(--hover); }
@@ -81,7 +92,7 @@ body { background: var(--bg); color: var(--fg); }
 
 .tab.active { background: var(--bg); color: var(--fg); }
 
-.tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-title { overflow: hidden; text-overflow: clip; white-space: nowrap; }
 
 .tab-close, .tab-new {
   border: none;
@@ -101,8 +112,9 @@ body { background: var(--bg); color: var(--fg); }
 
 .pane[hidden] { display: none; }
 
+/* One row tall by default (rows={1}); drag the corner to grow it. */
 .sql {
-  height: 140px;
+  flex-shrink: 0;
   resize: vertical;
   padding: 8px;
   border: none;
@@ -130,7 +142,7 @@ th, td {
   white-space: nowrap;
   max-width: 400px;
   overflow: hidden;
-  text-overflow: ellipsis;
+  text-overflow: clip;
 }
 
 th { position: sticky; top: 0; background: var(--panel); user-select: none; }

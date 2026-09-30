@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { tabLabels } from "./tabLabels";
 import { ResultTable } from "./ResultTable";
@@ -58,6 +59,7 @@ export default function App() {
   // Latest run per tab; only that run may write results, so a slow earlier
   // query can't overwrite a newer one.
   const runIds = useRef(new Map<number, number>());
+  const appRef = useRef<HTMLDivElement>(null);
 
   const updateTab = useCallback((id: number, patch: Partial<Tab>) => {
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -181,6 +183,29 @@ export default function App() {
     run(tabId, sel, q);
   }
 
+  // Writes the sidebar width straight to a CSS variable on .app: no React state, so a
+  // drag re-renders neither pane (the browser just re-lays out).
+  function startPaneDrag(e: ReactPointerEvent<HTMLDivElement>) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const app = appRef.current!;
+    const startX = e.clientX;
+    const startW = app.querySelector(".sidebar")!.getBoundingClientRect().width;
+    const prevCursor = document.body.style.cursor;
+    document.body.style.cursor = "col-resize";
+    const move = (ev: PointerEvent) => {
+      const w = Math.min(Math.max(startW + ev.clientX - startX, 120), window.innerWidth - 200);
+      app.style.setProperty("--sidebar-w", `${w}px`);
+    };
+    const up = () => {
+      document.body.style.cursor = prevCursor;
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
   function newTab() {
     const tab = makeTab(sel);
     setTabs((ts) => [...ts, tab]);
@@ -197,7 +222,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className="app" ref={appRef}>
       <aside className="sidebar">
         <select
           value={sel?.conn ?? ""}
@@ -238,6 +263,7 @@ export default function App() {
           ))}
         </ul>
       </aside>
+      <div className="divider" onPointerDown={startPaneDrag} />
       <main className="main">
         <div className="tabbar">
           {tabs.map((t) => (
@@ -290,6 +316,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
     <div className="pane" hidden={!active}>
       <textarea
         className="sql"
+        rows={1}
         value={tab.sql}
         placeholder="SQL — Enter to run, Shift+Enter for newline"
         spellCheck={false}

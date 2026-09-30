@@ -12,5 +12,8 @@
 - Test latency locally with the asyncio delaying proxy approach (chunk-delay, order-preserving) in front of the scratch Postgres.
 - Vite `server.watch.ignored` globs like `**/.claude/**` also match the root itself when the server runs inside `.claude/worktrees/…`, so it silently serves stale files. Anchor ignore globs to the config's own directory.
 - Column resizing: snapshot auto widths on first interaction, then `table-layout: fixed` + `<colgroup>`; memoize `<tbody>` so drags don't re-render rows.
+- Pane divider drag writes a CSS variable (`--sidebar-w`) on `.app` directly, bypassing React state, so dragging commits nothing.
+- To count React commits in a browser test, install a stub `__REACT_DEVTOOLS_GLOBAL_HOOK__` with `onCommitFiberRoot` via chrome-devtools `navigate_page` `initScript` (runs before app scripts; also a clean place for the Tauri `invoke` mock).
+- Text overflow is `clip` app-wide (user preference), not `ellipsis`.
 - Connection config uses explicit TOML fields rather than a libpq URL/key=value string inside a TOML string; that read as nonstandard.
 - libpq `sslmode=require` encrypts without verifying the certificate, but native-tls verifies by default. Map `prefer`/`require` to `danger_accept_invalid_certs` or cloud DBs fail to connect.
