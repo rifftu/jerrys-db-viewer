@@ -19,6 +19,9 @@
 - To act on a click without stealing focus from the SQL box, `preventDefault()` the `mousedown` (not `pointerdown`, which doesn't stop the focus change). Insert with `document.execCommand("insertText")` so native undo works and React's onChange fires; fall back to `setRangeText` + manual state update.
 - Selected cell: `ResultTable`'s `selected` ref, shown via `data-sel` on the `<td>`, `<tr>` and `<col>` (column tint = `<col>` background, so `<colgroup>` is always rendered). Use `data-*` for DOM-toggled state; React rewrites `className` when a cell's class prop changes (e.g. late FK info).
 - Prefer CSS system colors (`Highlight`, via `color-mix`) over hardcoded colors.
+- Tables a query touches: `EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON)` (plans, never executes) and collect `Schema` + `Relation Name` from the plan tree. Covers joins/subqueries/DML targets; views appear as base tables; multi-statement SQL and DDL error.
+- Modal `<dialog>` is `inset: 0`; use `height: fit-content` (not `auto`) or it stretches to max-height.
+- The bottom panel is a child of each tab's pane (state follows the tab); its height is shared via `--bottom-h` on `.main`.
 - Connection config uses explicit TOML fields rather than a libpq URL/key=value string inside a TOML string; that read as nonstandard.
 - libpq `sslmode=require` encrypts without verifying the certificate, but native-tls verifies by default. Map `prefer`/`require` to `danger_accept_invalid_certs` or cloud DBs fail to connect.
 - App icon: `npm run tauri icon <1024px.png>` regenerates `src-tauri/icons/`; delete the `ios/` and `android/` folders it adds (macOS-only app). `tauri dev` embeds `icon.icns` via `generate_context!()` and sets it as the Dock icon, but that macro only re-runs when the crate recompiles; `build.rs` emits `rerun-if-changed=icons` so an icon change forces it (otherwise the dev build keeps the old icon while release builds get the new one).

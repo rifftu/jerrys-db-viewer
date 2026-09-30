@@ -7,6 +7,9 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
 - Tabs (`+` / `×`) each keep their own connection, database, SQL and results.
 - Drag a column header's right edge to resize it; double-click the header to shrink it to ~3 characters,
   double-click its right edge to restore the default width. Widths reset on re-query.
+- Each tab has a bottom panel (drag its top edge to resize; click the open tab to collapse):
+  - **info**: metadata for every table the tab's last query touches (found via `EXPLAIN`, so nothing runs).
+  - **edit**: write SQL, **review** shows exactly what will run and on which connection/database, **execute** runs it.
 - Click a cell to select it (its row and column get a lighter tint; colors follow the system selection color).
 - With the SQL box focused, ⌥-click a header to insert `"column"`, or a cell to insert `'value'` (or `NULL`), at the cursor.
 - Press and hold a cell for 500ms to open its full value in a dialog (copy / close).

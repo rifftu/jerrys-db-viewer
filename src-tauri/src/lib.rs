@@ -82,6 +82,10 @@ struct Connection {
     name: String,
     /// The configured `dbname` (or `user`), used until another database is picked.
     dbname: String,
+    /// Shown in the edit panel's review header; the password is never sent to the UI.
+    host: String,
+    port: u16,
+    user: String,
 }
 
 #[derive(Serialize)]
@@ -207,7 +211,13 @@ fn format_db_error(e: tokio_postgres::Error) -> String {
 fn list_connections() -> Result<Vec<Connection>, String> {
     Ok(load_config()?
         .iter()
-        .map(|c| Connection { name: c.name.clone(), dbname: c.default_dbname().to_string() })
+        .map(|c| Connection {
+            name: c.name.clone(),
+            dbname: c.default_dbname().to_string(),
+            host: c.host.clone(),
+            port: c.port,
+            user: c.user.clone(),
+        })
         .collect())
 }
 
@@ -311,6 +321,116 @@ async fn describe_columns(
     Ok(describe(&state, &connection, &database, &sql).await)
 }
 
+fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+fn quote_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// (schema, table) of every relation in an EXPLAIN (VERBOSE, FORMAT JSON) plan, in first-seen order.
+fn plan_relations(v: &serde_json::Value, out: &mut Vec<(String, String)>) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let (Some(schema), Some(rel)) =
+                (m.get("Schema").and_then(|x| x.as_str()), m.get("Relation Name").and_then(|x| x.as_str()))
+            {
+                let r = (schema.to_string(), rel.to_string());
+                if !out.contains(&r) {
+                    out.push(r);
+                }
+            }
+            m.values().for_each(|x| plan_relations(x, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|x| plan_relations(x, out)),
+        _ => {}
+    }
+}
+
+/// Plain-text metadata for every table `sql` touches. Tables come from EXPLAIN (planned,
+/// not executed), so joins, subqueries and UPDATE/DELETE targets count; views show as
+/// their underlying tables. Two round trips: the EXPLAIN, then one batched catalog query.
+async fn tables_info_text(state: &AppState, connection: &str, database: &str, sql: &str) -> Result<String, String> {
+    let client = client(state, connection, database).await?;
+    let plan = simple_query(&client, &format!("EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) {sql}")).await?;
+    let json: String = plan.into_iter().flat_map(|s| s.rows).filter_map(|mut r| r.remove(0)).collect();
+    let plan: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let mut rels = Vec::new();
+    plan_relations(&plan, &mut rels);
+    if rels.is_empty() {
+        return Ok("No tables referenced.".into());
+    }
+    let arr = format!(
+        "ARRAY[{}]::regclass[]",
+        rels.iter()
+            .map(|(s, t)| quote_literal(&format!("{}.{}", quote_ident(s), quote_ident(t))))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let sets = simple_query(
+        &client,
+        &format!(
+            "SELECT c.oid, n.nspname, c.relname, c.reltuples::bigint, pg_size_pretty(pg_total_relation_size(c.oid)), \
+                    obj_description(c.oid, 'pg_class') \
+               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = ANY ({arr}); \
+             SELECT a.attrelid, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_get_expr(d.adbin, d.adrelid) \
+               FROM pg_attribute a LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
+              WHERE a.attrelid = ANY ({arr}) AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attrelid, a.attnum; \
+             SELECT conrelid, conname, pg_get_constraintdef(oid) FROM pg_constraint \
+              WHERE conrelid = ANY ({arr}) ORDER BY conrelid, contype, conname; \
+             SELECT indrelid, pg_get_indexdef(indexrelid) FROM pg_index WHERE indrelid = ANY ({arr}) ORDER BY indrelid, indexrelid"
+        ),
+    )
+    .await?;
+    let [tables, cols, cons, idx]: [Vec<Vec<Option<String>>>; 4] =
+        sets.into_iter().map(|s| s.rows).collect::<Vec<_>>().try_into().map_err(|_| "unexpected catalog result")?;
+    let v = |r: &Vec<Option<String>>, i: usize| r[i].clone().unwrap_or_default();
+
+    let mut out = String::new();
+    // Plan order, which follows the query.
+    for (schema, table) in &rels {
+        let Some(t) = tables.iter().find(|t| v(t, 1) == *schema && v(t, 2) == *table) else { continue };
+        let oid = v(t, 0);
+        let rows = match v(t, 3).as_str() {
+            "-1" => "?".to_string(),
+            n => n.to_string(),
+        };
+        out.push_str(&format!("{schema}.{table}  (~{rows} rows, {})\n", v(t, 4)));
+        if let Some(c) = &t[5] {
+            out.push_str(&format!("  -- {c}\n"));
+        }
+        out.push_str("columns:\n");
+        for c in cols.iter().filter(|c| v(c, 0) == oid) {
+            let not_null = if v(c, 3) == "t" { "  not null" } else { "" };
+            let default = c[4].as_ref().map(|d| format!("  default {d}")).unwrap_or_default();
+            out.push_str(&format!("  {}  {}{not_null}{default}\n", v(c, 1), v(c, 2)));
+        }
+        let cs: Vec<_> = cons.iter().filter(|c| v(c, 0) == oid).collect();
+        if !cs.is_empty() {
+            out.push_str("constraints:\n");
+            cs.iter().for_each(|c| out.push_str(&format!("  {}  {}\n", v(c, 1), v(c, 2))));
+        }
+        let is: Vec<_> = idx.iter().filter(|i| v(i, 0) == oid).collect();
+        if !is.is_empty() {
+            out.push_str("indexes:\n");
+            is.iter().for_each(|i| out.push_str(&format!("  {}\n", v(i, 1))));
+        }
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn tables_info(
+    state: tauri::State<'_, AppState>,
+    connection: String,
+    database: String,
+    sql: String,
+) -> Result<String, String> {
+    tables_info_text(&state, &connection, &database, &sql).await
+}
+
 #[tauri::command]
 async fn run_query(
     state: tauri::State<'_, AppState>,
@@ -343,7 +463,16 @@ mod tests {
         std::env::set_var("DB_VIEWER_CONFIG", &path);
 
         // dbname defaults to user.
-        assert_eq!(list_connections().unwrap(), vec![Connection { name: "t".into(), dbname: "postgres".into() }]);
+        assert_eq!(
+            list_connections().unwrap(),
+            vec![Connection {
+                name: "t".into(),
+                dbname: "postgres".into(),
+                host: "localhost".into(),
+                port: port.parse().unwrap(),
+                user: "postgres".into()
+            }]
+        );
         let state = AppState::default();
         let c = client(&state, "t", "postgres").await.unwrap();
         let sets = simple_query(
@@ -390,6 +519,19 @@ mod tests {
         );
         assert_eq!(describe(&state, "t", "postgres", "SELECT 1; SELECT 2").await, None);
 
+        // Table metadata for every table a query touches (joins and UPDATE targets included).
+        let info = tables_info_text(&state, "t", "postgres", "SELECT ch.id FROM dbv_child ch JOIN dbv_parent p ON p.pid = ch.parent_id")
+            .await
+            .unwrap();
+        assert!(info.contains("public.dbv_child") && info.contains("public.dbv_parent"), "{info}");
+        assert!(info.contains("parent_id  integer"), "{info}");
+        assert!(info.contains("FOREIGN KEY (parent_id) REFERENCES dbv_parent(pid)"), "{info}");
+        assert!(info.contains("CREATE UNIQUE INDEX dbv_parent_pkey"), "{info}");
+        let info = tables_info_text(&state, "t", "postgres", "UPDATE dbv_parent SET label = 'x' WHERE pid = 1").await.unwrap();
+        assert!(info.starts_with("public.dbv_parent"), "{info}");
+        assert_eq!(tables_info_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
+        assert!(tables_info_text(&state, "t", "postgres", "SELECT 1; SELECT 2").await.is_err());
+
         // Picking another database opens a separate client connected to it.
         simple_query(&c, "DROP DATABASE IF EXISTS dbv_other").await.unwrap();
         simple_query(&c, "CREATE DATABASE dbv_other").await.unwrap();
@@ -404,7 +546,7 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, run_query])
+        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, run_query])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

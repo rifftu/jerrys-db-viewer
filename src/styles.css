@@ -213,3 +213,79 @@ td.fk { text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
 col[data-sel], tr[data-sel] { background: color-mix(in srgb, Highlight 15%, transparent); }
 
 td[data-sel] { background: color-mix(in srgb, Highlight 45%, transparent); }
+
+/* Per-tab bottom panel. Height is shared via --bottom-h on .main (set by dragging its top edge). */
+.bottom {
+  flex-shrink: 0;
+  height: var(--bottom-h, 240px);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.bottom.collapsed { height: auto; }
+
+.bottom-resize { position: absolute; top: -3px; left: 0; right: 0; height: 6px; cursor: row-resize; z-index: 1; }
+
+.bottom-tabs { display: flex; flex-shrink: 0; border-bottom: 1px solid var(--border); }
+
+.bottom.collapsed .bottom-tabs { border-bottom: none; }
+
+.bottom-tabs button {
+  border: none;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.bottom-tabs button.active { color: var(--fg); background: var(--bg); }
+
+.bottom-body { flex: 1; min-height: 0; margin: 0; overflow: auto; background: var(--bg); }
+
+.info-dump { padding: 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+
+.edit { display: flex; flex-direction: column; padding: 6px 8px; gap: 4px; }
+
+.edit-subtitle { color: var(--muted); font-size: 11px; }
+
+.edit-box { position: relative; flex: 1; min-height: 0; display: flex; }
+
+.edit-box textarea {
+  flex: 1;
+  resize: none;
+  padding: 6px 8px 28px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+  outline: none;
+}
+
+.edit-review {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  font: inherit;
+  padding: 1px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.edit-review:disabled { opacity: 0.5; cursor: default; }
+
+.edit-result { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); white-space: pre-wrap; }
+
+.edit-result.error { color: var(--error); }
+
+/* fit-content, not auto: modal dialogs are inset: 0, so auto stretches to max-height. */
+.review-dialog { height: fit-content; max-height: min(70vh, 700px); }
+
+.review-dialog .cell-dialog-body { flex: none; max-height: calc(min(70vh, 700px) - 40px); }

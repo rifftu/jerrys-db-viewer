@@ -1646,6 +1646,7 @@ dependencies = [
  "native-tls",
  "postgres-native-tls",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",

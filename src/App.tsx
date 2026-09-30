@@ -4,10 +4,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { tabLabels } from "./tabLabels";
 import { ResultTable } from "./ResultTable";
 import { CellDialog, type CellDialogHandle } from "./CellDialog";
-import type { FkTarget, ResultSet, Selection } from "./types";
+import type { Connection, FkTarget, ResultSet, Selection } from "./types";
+import { BottomPanel } from "./BottomPanel";
+import { ReviewDialog, type Review, type ReviewDialogHandle } from "./ReviewDialog";
 import { quoteIdent, quoteLiteral } from "./sql";
 
-type Connection = { name: string; dbname: string };
 type Table = { schema: string; name: string };
 type Tab = {
   id: number;
@@ -16,6 +17,8 @@ type Tab = {
   fromTable: boolean;
   /** Start time (ms) of the most recent query. */
   lastRunAt: number | null;
+  /** SQL of the most recent run (the bottom panel's Info describes its tables). */
+  lastSql: string | null;
   /** Where this tab's queries run; independent of the sidebar and of other tabs. */
   target: Selection | null;
   sql: string;
@@ -38,6 +41,7 @@ const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
   title: table ?? "New tab",
   fromTable: table !== undefined,
   lastRunAt: null,
+  lastSql: null,
   target,
   sql,
   results: [],
@@ -64,6 +68,8 @@ export default function App() {
   const appRef = useRef<HTMLDivElement>(null);
   const cellDialog = useRef<CellDialogHandle>(null);
   const inspect = useCallback((value: string) => cellDialog.current?.open(value), []);
+  const reviewDialog = useRef<ReviewDialogHandle>(null);
+  const review = useCallback((r: Review) => reviewDialog.current?.open(r), []);
 
   const updateTab = useCallback((id: number, patch: Partial<Tab>) => {
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -114,7 +120,7 @@ export default function App() {
       if (!on || !query.trim()) return;
       const id = (runIds.current.get(tabId) ?? 0) + 1;
       runIds.current.set(tabId, id);
-      updateTab(tabId, { busy: true, error: "", lastRunAt: Date.now() });
+      updateTab(tabId, { busy: true, error: "", lastRunAt: Date.now(), lastSql: query });
       // Fired alongside the query (not awaited): the backend pipelines both on one
       // connection, and results render without waiting for FK info.
       invoke<(FkTarget | null)[] | null>("describe_columns", { connection: on.conn, database: on.db, sql: query })
@@ -296,10 +302,12 @@ export default function App() {
         </div>
         {/* Background tabs stay mounted (hidden) so switching is instant and keeps scroll position. */}
         {tabs.map((t) => (
-          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} onOpenFk={openFk} onInspect={inspect} />
+          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} onOpenFk={openFk} onInspect={inspect}
+            connection={connections.find((c) => c.name === t.target?.conn)} onReview={review} />
         ))}
       </main>
       <CellDialog ref={cellDialog} />
+      <ReviewDialog ref={reviewDialog} />
     </div>
   );
 }
@@ -311,10 +319,12 @@ type TabPaneProps = {
   onRun: (id: number, on: Selection | null, sql: string) => void;
   onOpenFk: (on: Selection, fk: FkTarget, value: string) => void;
   onInspect: (value: string) => void;
+  connection: Connection | undefined;
+  onReview: (review: Review) => void;
 };
 
 // Memoized so typing in or running one tab doesn't re-render other tabs' result tables.
-const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenFk, onInspect }: TabPaneProps) {
+const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenFk, onInspect, connection, onReview }: TabPaneProps) {
   const { target, results, error, busy, elapsed } = tab;
   // Only trust FK info describing the run whose results are shown; describe works on single statements.
   const colFks = tab.fks && tab.fks.run === tab.resultsRun && results.length === 1 ? tab.fks.cols : null;
@@ -368,6 +378,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
           ),
         )}
       </div>
+      <BottomPanel active={active} target={target} lastSql={tab.lastSql} connection={connection} onReview={onReview} />
     </div>
   );
 });
