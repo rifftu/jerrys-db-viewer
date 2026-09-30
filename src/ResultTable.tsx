@@ -7,7 +7,12 @@ type Props = {
   fks: (FkTarget | null)[] | null;
   target: Selection | null;
   onOpenFk: (on: Selection, fk: FkTarget, value: string) => void;
+  /** Long-press on a cell: show its value (as displayed). */
+  onInspect: (value: string) => void;
 };
+
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_SLOP_PX = 4;
 
 const MIN_WIDTH = 16;
 
@@ -26,8 +31,39 @@ function charsWidth(el: HTMLElement, n: number): number {
  * width as its default and switches the table to fixed layout. Widths are local state, so a
  * re-query (which remounts this component) starts from auto again.
  */
-export function ResultTable({ result, fks, target, onOpenFk }: Props) {
+export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props) {
   const tableRef = useRef<HTMLTableElement>(null);
+  const press = useRef<{ timer: number; x: number; y: number } | null>(null);
+
+  function cancelPress() {
+    if (press.current) clearTimeout(press.current.timer);
+    press.current = null;
+  }
+
+  // One delegated listener for the whole table; the cell's position gives its value,
+  // so rows need no per-cell handlers or attributes.
+  function startPress(e: ReactPointerEvent<HTMLTableElement>) {
+    cancelPress();
+    if (e.button !== 0) return;
+    const td = (e.target as HTMLElement).closest("tbody td") as HTMLTableCellElement | null;
+    if (!td) return;
+    const row = (td.parentElement as HTMLTableRowElement).sectionRowIndex;
+    const v = result.rows[row]?.[td.cellIndex];
+    if (v === undefined) return;
+    press.current = {
+      x: e.clientX,
+      y: e.clientY,
+      timer: window.setTimeout(() => {
+        press.current = null;
+        onInspect(v ?? "NULL");
+      }, LONG_PRESS_MS),
+    };
+  }
+
+  function movePress(e: ReactPointerEvent<HTMLTableElement>) {
+    const p = press.current;
+    if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP_PX) cancelPress();
+  }
   const defaults = useRef<number[] | null>(null);
   // Mirrored in a ref so drag handlers (closures from the pointerdown render) see the latest widths.
   const widthsRef = useRef<number[] | null>(null);
@@ -103,6 +139,11 @@ export function ResultTable({ result, fks, target, onOpenFk }: Props) {
   return (
     <table
       ref={tableRef}
+      onPointerDown={startPress}
+      onPointerMove={movePress}
+      onPointerUp={cancelPress}
+      onPointerCancel={cancelPress}
+      onPointerLeave={cancelPress}
       className={widths ? "sized" : undefined}
       style={widths ? { width: widths.reduce((a, b) => a + b, 0) } : undefined}
     >

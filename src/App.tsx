@@ -3,6 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { tabLabels } from "./tabLabels";
 import { ResultTable } from "./ResultTable";
+import { CellDialog, type CellDialogHandle } from "./CellDialog";
 import type { FkTarget, ResultSet, Selection } from "./types";
 
 type Connection = { name: string; dbname: string };
@@ -63,6 +64,8 @@ export default function App() {
   // query can't overwrite a newer one.
   const runIds = useRef(new Map<number, number>());
   const appRef = useRef<HTMLDivElement>(null);
+  const cellDialog = useRef<CellDialogHandle>(null);
+  const inspect = useCallback((value: string) => cellDialog.current?.open(value), []);
 
   const updateTab = useCallback((id: number, patch: Partial<Tab>) => {
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
@@ -295,9 +298,10 @@ export default function App() {
         </div>
         {/* Background tabs stay mounted (hidden) so switching is instant and keeps scroll position. */}
         {tabs.map((t) => (
-          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} onOpenFk={openFk} />
+          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} onOpenFk={openFk} onInspect={inspect} />
         ))}
       </main>
+      <CellDialog ref={cellDialog} />
     </div>
   );
 }
@@ -308,10 +312,11 @@ type TabPaneProps = {
   onSqlChange: (id: number, sql: string) => void;
   onRun: (id: number, on: Selection | null, sql: string) => void;
   onOpenFk: (on: Selection, fk: FkTarget, value: string) => void;
+  onInspect: (value: string) => void;
 };
 
 // Memoized so typing in or running one tab doesn't re-render other tabs' result tables.
-const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenFk }: TabPaneProps) {
+const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenFk, onInspect }: TabPaneProps) {
   const { target, results, error, busy, elapsed } = tab;
   // Only trust FK info describing the run whose results are shown; describe works on single statements.
   const colFks = tab.fks && tab.fks.run === tab.resultsRun && results.length === 1 ? tab.fks.cols : null;
@@ -340,7 +345,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
         {results.map((r, i) =>
           r.columns.length ? (
             // Keyed by run so a re-query starts with fresh (auto) column widths.
-            <ResultTable key={`${tab.resultsRun}-${i}`} result={r} fks={colFks} target={target} onOpenFk={onOpenFk} />
+            <ResultTable key={`${tab.resultsRun}-${i}`} result={r} fks={colFks} target={target} onOpenFk={onOpenFk} onInspect={onInspect} />
           ) : (
             <div key={i} className="affected">
               {r.affected} row(s) affected

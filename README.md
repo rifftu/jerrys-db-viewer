@@ -7,6 +7,7 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
 - Tabs (`+` / `×`) each keep their own connection, database, SQL and results.
 - Drag a column header's right edge to resize it; double-click the header to shrink it to ~3 characters,
   double-click its right edge to restore the default width. Widths reset on re-query.
+- Press and hold a cell for 500ms to open its full value in a dialog (copy / close).
 - Foreign-key values are underlined; ⌘-click one to open the referenced row(s) in a new tab.
   FKs are cached per database when the sidebar lists its tables (re-select the database to refresh).
 - Type SQL, press **Enter** to run it (**Shift+Enter** for a newline).

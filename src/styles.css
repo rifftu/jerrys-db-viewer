@@ -160,3 +160,50 @@ table.sized th, table.sized td { max-width: none; }
 td.null { color: var(--muted); font-style: italic; }
 
 td.fk { text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+
+/* Long-press cell viewer. No padding on the <dialog> itself, so a click on it is a backdrop click. */
+.cell-dialog {
+  width: min(80vw, 900px);
+  height: min(70vh, 700px);
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.cell-dialog[open] { display: flex; flex-direction: column; }
+
+.cell-dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+
+.cell-dialog-body {
+  flex: 1;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  user-select: text;
+}
+
+.cell-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 4px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.cell-dialog-footer button {
+  font: inherit;
+  padding: 1px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.cell-dialog-footer button:hover { background: var(--hover); }
