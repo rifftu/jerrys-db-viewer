@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { FkTarget, ResultSet, Selection } from "./types";
 
 type Props = {
@@ -10,6 +10,9 @@ type Props = {
   /** Long-press on a cell: show its value (as displayed). */
   onInspect: (value: string) => void;
 };
+
+/** A data cell resolved from a DOM event target. */
+type Cell = { row: number; col: number; value: string | null; fk: FkTarget | null };
 
 const LONG_PRESS_MS = 500;
 const LONG_PRESS_SLOP_PX = 4;
@@ -35,27 +38,45 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props)
   const tableRef = useRef<HTMLTableElement>(null);
   const press = useRef<{ timer: number; x: number; y: number } | null>(null);
 
+  /**
+   * Resolves an event target to the data cell under it. All cell interactions go through
+   * delegated listeners on <table> plus this lookup, so rows carry no per-cell handlers.
+   * Assumes rendered rows/cells map 1:1 onto `result.rows` (no virtualization, reordering
+   * or hidden columns; one <tbody>).
+   */
+  function cellAt(target: EventTarget): Cell | null {
+    const td = (target as HTMLElement).closest?.("tbody td") as HTMLTableCellElement | null;
+    if (!td || !tableRef.current?.contains(td)) return null;
+    const row = (td.parentElement as HTMLTableRowElement).sectionRowIndex;
+    const col = td.cellIndex;
+    const value = result.rows[row]?.[col];
+    if (value === undefined) return null;
+    return { row, col, value, fk: fks?.[col] ?? null };
+  }
+
+  function onClick(e: ReactMouseEvent<HTMLTableElement>) {
+    if (!(e.metaKey || e.ctrlKey)) return;
+    const cell = cellAt(e.target);
+    if (cell?.fk && cell.value !== null && target) onOpenFk(target, cell.fk, cell.value);
+  }
+
+  // Long press: show the value as displayed.
   function cancelPress() {
     if (press.current) clearTimeout(press.current.timer);
     press.current = null;
   }
 
-  // One delegated listener for the whole table; the cell's position gives its value,
-  // so rows need no per-cell handlers or attributes.
   function startPress(e: ReactPointerEvent<HTMLTableElement>) {
     cancelPress();
     if (e.button !== 0) return;
-    const td = (e.target as HTMLElement).closest("tbody td") as HTMLTableCellElement | null;
-    if (!td) return;
-    const row = (td.parentElement as HTMLTableRowElement).sectionRowIndex;
-    const v = result.rows[row]?.[td.cellIndex];
-    if (v === undefined) return;
+    const cell = cellAt(e.target);
+    if (!cell) return;
     press.current = {
       x: e.clientX,
       y: e.clientY,
       timer: window.setTimeout(() => {
         press.current = null;
-        onInspect(v ?? "NULL");
+        onInspect(cell.value ?? "NULL");
       }, LONG_PRESS_MS),
     };
   }
@@ -64,6 +85,7 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props)
     const p = press.current;
     if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > LONG_PRESS_SLOP_PX) cancelPress();
   }
+
   const defaults = useRef<number[] | null>(null);
   // Mirrored in a ref so drag handlers (closures from the pointerdown render) see the latest widths.
   const widthsRef = useRef<number[] | null>(null);
@@ -117,12 +139,7 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props)
               }
               if (fk && target) {
                 return (
-                  <td
-                    key={k}
-                    className="fk"
-                    title={`⌘-click: ${fk.table}.${fk.column} = ${v}`}
-                    onClick={(e) => (e.metaKey || e.ctrlKey) && onOpenFk(target, fk, v)}
-                  >
+                  <td key={k} className="fk" title={`⌘-click: ${fk.table}.${fk.column} = ${v}`}>
                     {v}
                   </td>
                 );
@@ -133,12 +150,13 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect }: Props)
         ))}
       </tbody>
     ),
-    [result, fks, target, onOpenFk],
+    [result, fks, target],
   );
 
   return (
     <table
       ref={tableRef}
+      onClick={onClick}
       onPointerDown={startPress}
       onPointerMove={movePress}
       onPointerUp={cancelPress}
