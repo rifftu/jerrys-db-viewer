@@ -22,6 +22,9 @@
 - Tables a query touches: `EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON)` (plans, never executes) and collect `Schema` + `Relation Name` from the plan tree. Covers joins/subqueries/DML targets; views appear as base tables; multi-statement SQL and DDL error.
 - Modal `<dialog>` is `inset: 0`; use `height: fit-content` (not `auto`) or it stretches to max-height.
 - The bottom panel is a child of each tab's pane (state follows the tab); its height is shared via `--bottom-h` on `.main`.
+- Row shortcuts (`src/rowSql.ts`) only apply when the tab's last run is the exact SQL the app generated for one table (`tab.source.sql`); this sidesteps analysing arbitrary SQL. Keys: PK first, then unique indexes without predicate/expressions, all non-NULL in the row.
+- Frontend modules imported by node tests use explicit `.ts` extensions (`allowImportingTsExtensions` in tsconfig).
+- After `execCommand("insertText")` the textarea DOM is updated synchronously; set the selection immediately rather than in rAF.
 - Connection config uses explicit TOML fields rather than a libpq URL/key=value string inside a TOML string; that read as nonstandard.
 - libpq `sslmode=require` encrypts without verifying the certificate, but native-tls verifies by default. Map `prefer`/`require` to `danger_accept_invalid_certs` or cloud DBs fail to connect.
 - App icon: `npm run tauri icon <1024px.png>` regenerates `src-tauri/icons/`; delete the `ios/` and `android/` folders it adds (macOS-only app). `tauri dev` embeds `icon.icns` via `generate_context!()` and sets it as the Dock icon, but that macro only re-runs when the crate recompiles; `build.rs` emits `rerun-if-changed=icons` so an icon change forces it (otherwise the dev build keeps the old icon while release builds get the new one).

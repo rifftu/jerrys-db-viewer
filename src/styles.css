@@ -252,6 +252,21 @@ td[data-sel] { background: color-mix(in srgb, Highlight 45%, transparent); }
 
 .edit-subtitle { color: var(--muted); font-size: 11px; }
 
+.edit-header { display: flex; align-items: center; gap: 6px; }
+
+.edit-header button {
+  font: inherit;
+  font-size: 11px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+.edit-header button:disabled { opacity: 0.4; cursor: default; }
+
 .edit-box { position: relative; flex: 1; min-height: 0; display: flex; }
 
 .edit-box textarea {

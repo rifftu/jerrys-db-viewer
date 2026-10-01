@@ -1,8 +1,9 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Connection, ResultSet, Selection } from "./types";
 import type { Review } from "./ReviewDialog";
+import { deleteSql, insertSql, pickKey, updateSql, type TableMeta, type TableRef } from "./rowSql.ts";
 
 type Props = {
   /** The owning tab is the visible one (Info only fetches then). */
@@ -12,6 +13,12 @@ type Props = {
   lastSql: string | null;
   connection: Connection | undefined;
   onReview: (review: Review) => void;
+  /** Table for row shortcuts, or null when the tab's results aren't an unmodified single-table query. */
+  editTable: TableRef | null;
+  /** Column names of the shown result (single result set), for mapping the selected row. */
+  resultColumns: string[] | null;
+  /** The tab's selected cell (read on click; selecting doesn't re-render this panel). */
+  getSelection: () => { values: (string | null)[]; col: number } | null;
 };
 
 /** Height is shared across tabs: written straight to --bottom-h on .main, so dragging re-renders nothing. */
@@ -42,12 +49,76 @@ function summarize(sets: ResultSet[]): string {
 }
 
 /** Per-tab bottom panel (a child of the tab's pane, so its state follows the tab). */
-export const BottomPanel = memo(function BottomPanel({ active, target, lastSql, connection, onReview }: Props) {
+export const BottomPanel = memo(function BottomPanel({
+  active,
+  target,
+  lastSql,
+  connection,
+  onReview,
+  editTable,
+  resultColumns,
+  getSelection,
+}: Props) {
   const [panel, setPanel] = useState<"info" | "edit">("info");
   const [collapsed, setCollapsed] = useState(false);
   const [info, setInfo] = useState<{ key: string; text: string } | null>(null);
   const [editSql, setEditSql] = useState("");
   const [execResult, setExecResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const editRef = useRef<HTMLTextAreaElement>(null);
+  const [meta, setMeta] = useState<{ key: string; meta: TableMeta | null; error?: string } | null>(null);
+
+  // Row shortcuts need the table's columns and unique keys: fetched while Edit is visible, cached per table.
+  const metaKey = target && editTable ? [target.conn, target.db, editTable.schema, editTable.table].join("\u0000") : null;
+  const editVisible = active && !collapsed && panel === "edit";
+  useEffect(() => {
+    if (!editVisible || !metaKey || !target || !editTable || meta?.key === metaKey) return;
+    let stale = false;
+    invoke<TableMeta>("table_meta", { connection: target.conn, database: target.db, schema: editTable.schema, table: editTable.table })
+      .then((m) => !stale && setMeta({ key: metaKey, meta: m }))
+      .catch((e) => !stale && setMeta({ key: metaKey, meta: null, error: String(e) }));
+    return () => {
+      stale = true;
+    };
+  }, [editVisible, metaKey]);
+  const tableMeta = editTable && meta?.key === metaKey ? meta.meta : null;
+  const hasKey = !!(tableMeta && resultColumns && pickKey(tableMeta, resultColumns));
+  const shortcutsOff = !editTable
+    ? "Only for tabs showing a table opened from the sidebar or an FK, with that query unmodified"
+    : !tableMeta
+      ? (meta?.error ?? "Loading table metadata…")
+      : null;
+  const rowShortcutsOff = shortcutsOff ?? (hasKey ? null : "Table has no primary key or plain unique index in the result");
+
+  /** Replace the edit box with generated SQL (undoable), then focus it with an optional selection. */
+  function fill(sql: string, sel?: [number, number]) {
+    const ta = editRef.current;
+    setExecResult(null);
+    if (!ta) return setEditSql(sql);
+    ta.focus();
+    ta.select();
+    if (document.execCommand("insertText", false, sql)) {
+      // insertText updates the DOM synchronously, so the selection can be set right away.
+      if (sel) ta.setSelectionRange(sel[0], sel[1]);
+      return;
+    }
+    // Fallback: React applies the new value on the next render.
+    setEditSql(sql);
+    requestAnimationFrame(() => {
+      ta.focus();
+      if (sel) ta.setSelectionRange(sel[0], sel[1]);
+    });
+  }
+
+  function rowShortcut(kind: "delete" | "edit") {
+    if (!editTable || !tableMeta || !resultColumns) return;
+    const s = getSelection();
+    if (!s) return setExecResult({ ok: false, text: "Select a cell first." });
+    const key = pickKey(tableMeta, resultColumns, s.values);
+    if (!key) return setExecResult({ ok: false, text: "The selected row has NULL in every unique key; it can't be targeted." });
+    if (kind === "delete") return fill(deleteSql(editTable, key, resultColumns, s.values));
+    const u = updateSql(editTable, key, resultColumns, s.values, s.col);
+    fill(u.sql, [u.selStart, u.selEnd]);
+  }
 
   // Info: fetched only while visible, cached until the tab runs a different query.
   const infoKey = target && lastSql ? `${target.conn}\u0000${target.db}\u0000${lastSql}` : null;
@@ -105,9 +176,28 @@ export const BottomPanel = memo(function BottomPanel({ active, target, lastSql, 
       )}
       {!collapsed && panel === "edit" && (
         <div className="bottom-body edit">
-          <div className="edit-subtitle">don't do anything stupid!</div>
+          <div className="edit-header">
+            <span className="edit-subtitle">don't do anything stupid!</span>
+            <button disabled={!!rowShortcutsOff} title={rowShortcutsOff ?? "DELETE the selected row"} onClick={() => rowShortcut("delete")}>
+              delete row
+            </button>
+            <button
+              disabled={!!rowShortcutsOff}
+              title={rowShortcutsOff ?? "UPDATE the selected cell"}
+              onClick={() => rowShortcut("edit")}
+            >
+              edit value
+            </button>
+            <button
+              disabled={!!shortcutsOff}
+              title={shortcutsOff ?? "INSERT a new row"}
+              onClick={() => editTable && tableMeta && fill(insertSql(editTable, tableMeta))}
+            >
+              add row
+            </button>
+          </div>
           <div className="edit-box">
-            <textarea value={editSql} spellCheck={false} onChange={(e) => setEditSql(e.target.value)} />
+            <textarea ref={editRef} value={editSql} spellCheck={false} onChange={(e) => setEditSql(e.target.value)} />
             <button className="edit-review" onClick={review} disabled={!target || !editSql.trim()}>
               review
             </button>

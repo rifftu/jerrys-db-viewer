@@ -12,6 +12,8 @@ type Props = {
   onInspect: (value: string) => void;
   /** Option-click: insert text at the SQL cursor; false if the SQL box isn't focused. */
   onInsert: (text: string) => boolean;
+  /** A cell was selected: its row's values and column index (for selection-aware features). */
+  onSelect: (sel: { values: (string | null)[]; col: number }) => void;
 };
 
 /** A data cell resolved from a DOM event target. */
@@ -37,7 +39,7 @@ function charsWidth(el: HTMLElement, n: number): number {
  * width as its default and switches the table to fixed layout. Widths are local state, so a
  * re-query (which remounts this component) starts from auto again.
  */
-export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert }: Props) {
+export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert, onSelect }: Props) {
   const tableRef = useRef<HTMLTableElement>(null);
   const press = useRef<{ timer: number; x: number; y: number } | null>(null);
 
@@ -71,6 +73,7 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert
     const marked = [cell.td, cell.td.parentElement as HTMLElement, ...(col ? [col] : [])];
     for (const el of marked) el.dataset.sel = "";
     selected.current = { cell, marked };
+    onSelect({ values: result.rows[cell.row], col: cell.col });
   }
 
   /** Column index of the header under an event target. */

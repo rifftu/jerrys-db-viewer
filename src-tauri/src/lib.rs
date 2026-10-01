@@ -421,6 +421,76 @@ async fn tables_info_text(state: &AppState, connection: &str, database: &str, sq
     Ok(out)
 }
 
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct ColumnMeta {
+    name: String,
+    /// pg_type.typcategory (S string, B bool, N numeric, A array, D date/time, ...).
+    category: String,
+    typname: String,
+    not_null: bool,
+    has_default: bool,
+    generated: bool,
+    identity: bool,
+}
+
+#[derive(Serialize, Debug)]
+struct TableMeta {
+    columns: Vec<ColumnMeta>,
+    /// Column names of the primary key (first) and plain unique indexes (no predicate/expressions).
+    keys: Vec<Vec<String>>,
+}
+
+/// Columns and unique keys of one table, for generating row-level SQL. One round trip.
+async fn table_meta_of(state: &AppState, connection: &str, database: &str, schema: &str, table: &str) -> Result<TableMeta, String> {
+    let client = client(state, connection, database).await?;
+    let reg = format!("{}::regclass", quote_literal(&format!("{}.{}", quote_ident(schema), quote_ident(table))));
+    let sets = simple_query(
+        &client,
+        &format!(
+            "SELECT a.attname, t.typcategory, t.typname, a.attnotnull, a.atthasdef, a.attgenerated <> '', a.attidentity <> '' \
+               FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
+              WHERE a.attrelid = {reg} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum; \
+             SELECT (SELECT json_agg(a.attname ORDER BY k.o) FROM unnest(i.indkey) WITH ORDINALITY k(n, o) \
+                       JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.n) \
+               FROM pg_index i \
+              WHERE i.indrelid = {reg} AND i.indisunique AND i.indisvalid AND i.indpred IS NULL AND i.indexprs IS NULL \
+              ORDER BY i.indisprimary DESC, i.indexrelid"
+        ),
+    )
+    .await?;
+    let [cols, keys]: [Vec<Vec<Option<String>>>; 2] =
+        sets.into_iter().map(|s| s.rows).collect::<Vec<_>>().try_into().map_err(|_| "unexpected catalog result")?;
+    let text = |r: &Vec<Option<String>>, i: usize| r[i].clone().unwrap_or_default();
+    let flag = |r: &Vec<Option<String>>, i: usize| r[i].as_deref() == Some("t");
+    Ok(TableMeta {
+        columns: cols
+            .iter()
+            .map(|r| ColumnMeta {
+                name: text(r, 0),
+                category: text(r, 1),
+                typname: text(r, 2),
+                not_null: flag(r, 3),
+                has_default: flag(r, 4),
+                generated: flag(r, 5),
+                identity: flag(r, 6),
+            })
+            .collect(),
+        keys: keys.iter().filter_map(|r| serde_json::from_str(r[0].as_deref()?).ok()).collect(),
+    })
+}
+
+#[tauri::command]
+async fn table_meta(
+    state: tauri::State<'_, AppState>,
+    connection: String,
+    database: String,
+    schema: String,
+    table: String,
+) -> Result<TableMeta, String> {
+    table_meta_of(&state, &connection, &database, &schema, &table).await
+}
+
 #[tauri::command]
 async fn tables_info(
     state: tauri::State<'_, AppState>,
@@ -532,6 +602,25 @@ mod tests {
         assert_eq!(tables_info_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
         assert!(tables_info_text(&state, "t", "postgres", "SELECT 1; SELECT 2").await.is_err());
 
+        // Row-SQL metadata: columns with flags, primary key first, plain unique indexes only.
+        simple_query(
+            &c,
+            "DROP TABLE IF EXISTS dbv_meta; \
+             CREATE TABLE dbv_meta (id serial PRIMARY KEY, \"we ird\" text NOT NULL, a int, b int, \
+               up text GENERATED ALWAYS AS (upper(\"we ird\")) STORED, ok boolean NOT NULL, \
+               UNIQUE (a, b)); \
+             CREATE UNIQUE INDEX dbv_meta_partial ON dbv_meta (a) WHERE a > 0",
+        )
+        .await
+        .unwrap();
+        let m = table_meta_of(&state, "t", "postgres", "public", "dbv_meta").await.unwrap();
+        assert_eq!(m.keys, vec![vec!["id".to_string()], vec!["a".to_string(), "b".to_string()]]);
+        let names: Vec<_> = m.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "we ird", "a", "b", "up", "ok"]);
+        assert!(m.columns[0].has_default && m.columns[0].not_null && m.columns[0].category == "N");
+        assert!(m.columns[4].generated && !m.columns[2].not_null);
+        assert_eq!((m.columns[5].category.as_str(), m.columns[5].typname.as_str()), ("B", "bool"));
+
         // Picking another database opens a separate client connected to it.
         simple_query(&c, "DROP DATABASE IF EXISTS dbv_other").await.unwrap();
         simple_query(&c, "CREATE DATABASE dbv_other").await.unwrap();
@@ -546,7 +635,7 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, run_query])
+        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, table_meta, run_query])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
