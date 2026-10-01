@@ -428,6 +428,8 @@ struct ColumnMeta {
     /// pg_type.typcategory (S string, B bool, N numeric, A array, D date/time, ...).
     category: String,
     typname: String,
+    /// format_type(), e.g. "character varying(255)", for annotating generated SQL.
+    display_type: String,
     not_null: bool,
     has_default: bool,
     generated: bool,
@@ -453,7 +455,7 @@ async fn table_meta_of(state: &AppState, connection: &str, database: &str, schem
         &client,
         &format!(
             "SELECT a.attname, t.typcategory, t.typname, a.attnotnull, a.atthasdef, a.attgenerated <> '', a.attidentity <> '', \
-                    a.attrelid, a.attnum \
+                    a.attrelid, a.attnum, format_type(a.atttypid, a.atttypmod) \
                FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
               WHERE a.attrelid = {reg} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum; \
              SELECT (SELECT json_agg(a.attname ORDER BY k.o) FROM unnest(i.indkey) WITH ORDINALITY k(n, o) \
@@ -475,6 +477,7 @@ async fn table_meta_of(state: &AppState, connection: &str, database: &str, schem
                 name: text(r, 0),
                 category: text(r, 1),
                 typname: text(r, 2),
+                display_type: text(r, 9),
                 not_null: flag(r, 3),
                 has_default: flag(r, 4),
                 generated: flag(r, 5),
@@ -671,6 +674,7 @@ mod tests {
         assert!(m.columns[0].has_default && m.columns[0].not_null && m.columns[0].category == "N");
         assert!(m.columns[4].generated && !m.columns[2].not_null);
         assert_eq!((m.columns[5].category.as_str(), m.columns[5].typname.as_str()), ("B", "bool"));
+        assert_eq!((m.columns[0].display_type.as_str(), m.columns[5].display_type.as_str()), ("integer", "boolean"));
 
         // Edit context: hand-written single-table queries are fine; aliases map back to columns.
         let ctx = edit_context_of(&state, "t", "postgres", "SELECT * FROM dbv_meta WHERE a > 0 ORDER BY id DESC LIMIT 5").await.unwrap();

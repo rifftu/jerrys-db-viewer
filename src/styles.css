@@ -269,13 +269,13 @@ td[data-sel] { background: color-mix(in srgb, Highlight 45%, transparent); }
 
 .edit-box { position: relative; flex: 1; min-height: 0; display: flex; }
 
+/* No visible box: the SQL reads as part of the panel, aligned with the subtitle and buttons. */
 .edit-box textarea {
   flex: 1;
   resize: none;
-  padding: 6px 8px 28px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--bg);
+  padding: 0 0 28px;
+  border: none;
+  background: transparent;
   color: var(--fg);
   font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
   outline: none;

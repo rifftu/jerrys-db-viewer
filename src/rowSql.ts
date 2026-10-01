@@ -5,6 +5,8 @@ export type ColumnMeta = {
   /** pg_type.typcategory: S string, B boolean, N numeric, A array, D date/time, E enum, U user... */
   category: string;
   typname: string;
+  /** format_type(), e.g. "character varying(255)". */
+  displayType: string;
   notNull: boolean;
   hasDefault: boolean;
   generated: boolean;
@@ -83,7 +85,43 @@ export function placeholder(c: ColumnMeta): string {
   }
 }
 
+/** Comment text can't contain a line break, or the rest would become SQL. */
+const oneLine = (s: string) => s.replace(/[\r\n]+/g, " ");
+
+/** "integer, default" / "text, not null" / "text, nullable". */
+function annotation(c: ColumnMeta): string {
+  const kind = c.hasDefault || c.identity ? "default" : c.notNull ? "not null" : "nullable";
+  return oneLine(`${c.displayType}, ${kind}`);
+}
+
+/** One "  <code>[,]  -- <comment>" line per item, comments aligned. */
+function annotatedLines(items: { code: string; comment: string }[]): string {
+  const codes = items.map((it, i) => it.code + (i < items.length - 1 ? "," : ""));
+  const width = Math.max(...codes.map((c) => c.length));
+  return codes.map((c, i) => `  ${c.padEnd(width)}  -- ${items[i].comment}`).join("\n");
+}
+
+/** INSERT with every non-generated column, one value per line, each annotated with column and type. */
 export function insertSql(t: TableRef, meta: TableMeta): string {
   const cols = meta.columns.filter((c) => !c.generated);
-  return `INSERT INTO ${qualified(t)} (${cols.map((c) => quoteIdent(c.name)).join(", ")})\nVALUES (${cols.map(placeholder).join(", ")});`;
+  const lines = annotatedLines(cols.map((c) => ({ code: placeholder(c), comment: `${oneLine(c.name)}  ${annotation(c)}` })));
+  return `INSERT INTO ${qualified(t)} (${cols.map((c) => quoteIdent(c.name)).join(", ")})\nVALUES (\n${lines}\n);`;
+}
+
+/**
+ * UPDATE of the selected row, one SET line per editable column prefilled with its current value.
+ * Editable: result columns read directly from the table, minus the key used in WHERE and columns
+ * Postgres won't update (generated, identity). Null when nothing is editable.
+ */
+export function editRowSql(t: TableRef, meta: TableMeta, key: string[], columns: ResultColumns, row: (string | null)[]): string | null {
+  const seen = new Set<string>(key);
+  const items: { code: string; comment: string }[] = [];
+  columns.forEach((name, i) => {
+    const c = name === null ? undefined : meta.columns.find((m) => m.name === name);
+    if (!c || seen.has(c.name) || c.generated || c.identity) return;
+    seen.add(c.name);
+    items.push({ code: `${quoteIdent(c.name)} = ${sqlValue(row[i])}`, comment: annotation(c) });
+  });
+  if (!items.length) return null;
+  return `UPDATE ${qualified(t)} SET\n${annotatedLines(items)}\nWHERE ${where(key, columns, row)};`;
 }

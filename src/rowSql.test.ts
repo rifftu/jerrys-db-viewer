@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deleteSql, insertSql, pickKey, placeholder, updateSql, type ColumnMeta, type TableMeta } from "./rowSql.ts";
+import { deleteSql, editRowSql, insertSql, pickKey, placeholder, updateSql, type ColumnMeta, type TableMeta } from "./rowSql.ts";
 
 const col = (name: string, o: Partial<ColumnMeta> = {}): ColumnMeta => ({
   name,
   category: "S",
   typname: "text",
+  displayType: "text",
   notNull: false,
   hasDefault: false,
   generated: false,
@@ -56,12 +57,59 @@ test("placeholders", () => {
   assert.equal(placeholder(col("e", { notNull: true, category: "E", typname: "mood" })), "NULL");
 });
 
-test("insertSql skips generated columns", () => {
+test("insertSql: one annotated value per line, generated columns skipped", () => {
   const meta: TableMeta = {
-    columns: [col("id", { notNull: true, hasDefault: true }), col("email", { notNull: true }), col("upper", { generated: true }), col("note")],
+    columns: [
+      col("id", { notNull: true, hasDefault: true, displayType: "integer", category: "N" }),
+      col("email", { notNull: true, displayType: "character varying(255)" }),
+      col("upper", { generated: true }),
+      col("note"),
+    ],
     keys: [["id"]],
   };
-  assert.equal(insertSql(t, meta), `INSERT INTO "public"."users" ("id", "email", "note")\nVALUES (DEFAULT, '', NULL);`);
+  assert.equal(
+    insertSql(t, meta),
+    [
+      `INSERT INTO "public"."users" ("id", "email", "note")`,
+      `VALUES (`,
+      `  DEFAULT,  -- id  integer, default`,
+      `  '',       -- email  character varying(255), not null`,
+      `  NULL      -- note  text, nullable`,
+      `);`,
+    ].join("\n"),
+  );
+});
+
+test("editRowSql: current values, key/generated/identity/computed columns left out", () => {
+  const meta: TableMeta = {
+    columns: [
+      col("id", { notNull: true, identity: true, displayType: "integer" }),
+      col("email", { notNull: true }),
+      col("note"),
+      col("up", { generated: true }),
+      col("n", { displayType: "integer" }),
+    ],
+    keys: [["id"]],
+  };
+  // e.g. SELECT id, email, note, up, n, lower(email), email FROM ...
+  const cols = ["id", "email", "note", "up", "n", null, "email"];
+  const r = ["5", "it's", null, "IT'S", "3", "x", "it's"];
+  assert.equal(
+    editRowSql(t, meta, ["id"], cols, r),
+    [
+      `UPDATE "public"."users" SET`,
+      `  "email" = 'it''s',  -- text, not null`,
+      `  "note" = NULL,      -- text, nullable`,
+      `  "n" = '3'           -- integer, nullable`,
+      `WHERE "id" = '5';`,
+    ].join("\n"),
+  );
+  assert.equal(editRowSql(t, meta, ["id"], ["id", "up"], ["5", "X"]), null, "nothing editable");
+});
+
+test("comments never contain line breaks", () => {
+  const meta: TableMeta = { columns: [col("we\nird")], keys: [] };
+  assert.ok(insertSql(t, meta).includes("-- we ird  text, nullable"));
 });
 
 test("result columns may be aliased (mapped to real names) or computed (null)", () => {

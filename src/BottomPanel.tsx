@@ -3,7 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Connection, ResultSet, Selection } from "./types";
 import type { Review } from "./ReviewDialog";
-import { deleteSql, insertSql, pickKey, updateSql, type EditContext } from "./rowSql.ts";
+import { deleteSql, editRowSql, insertSql, pickKey, updateSql, type EditContext } from "./rowSql.ts";
 
 type Props = {
   /** The owning tab is the visible one (Info only fetches then). */
@@ -111,13 +111,18 @@ export const BottomPanel = memo(function BottomPanel({
     });
   }
 
-  function rowShortcut(kind: "delete" | "edit") {
+  function rowShortcut(kind: "delete" | "edit" | "row") {
     if (!ctx) return;
     const s = getSelection();
     if (!s) return setExecResult({ ok: false, text: "Select a cell first." });
     const key = pickKey(ctx, ctx.resultColumns, s.values);
     if (!key) return setExecResult({ ok: false, text: "The selected row has NULL in every unique key; it can't be targeted." });
     if (kind === "delete") return fill(deleteSql(ctx, key, ctx.resultColumns, s.values));
+    if (kind === "row") {
+      const sql = editRowSql(ctx, ctx, key, ctx.resultColumns, s.values);
+      if (!sql) return setExecResult({ ok: false, text: `No editable columns of ${ctx.table} in the result.` });
+      return fill(sql);
+    }
     if (ctx.resultColumns[s.col] === null) {
       return setExecResult({ ok: false, text: `That column isn't a column of ${ctx.table} (it's computed), so it can't be edited.` });
     }
@@ -192,6 +197,13 @@ export const BottomPanel = memo(function BottomPanel({
               onClick={() => rowShortcut("edit")}
             >
               edit value
+            </button>
+            <button
+              disabled={!!rowShortcutsOff}
+              title={rowShortcutsOff ?? "UPDATE every column of the selected row"}
+              onClick={() => rowShortcut("row")}
+            >
+              edit row
             </button>
             <button
               disabled={!!shortcutsOff}

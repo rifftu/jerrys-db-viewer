@@ -12,7 +12,8 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
   - **edit**: write SQL, **review** shows exactly what will run and on which connection/database, **execute** runs it.
     When the tab's last query reads exactly one table (WHERE / ORDER BY / LIMIT / column lists are fine; no joins),
     shortcuts generate SQL for the
-    selected cell: **delete row** / **edit value** (by primary key or unique index) and **add row** (defaults/NULLs).
+    selected cell: **delete row** / **edit value** / **edit row** (by primary key or unique index; edit row prefills
+    every editable column) and **add row** (defaults/NULLs). Generated rows annotate each value with its column and type.
 - Click a cell to select it (its row and column get a lighter tint; colors follow the system selection color).
 - With the SQL box focused, ⌥-click a header to insert `"column"`, or a cell to insert `'value'` (or `NULL`), at the cursor.
 - Press and hold a cell for 500ms to open its full value in a dialog (copy / close).
