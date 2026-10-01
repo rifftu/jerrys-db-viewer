@@ -22,7 +22,7 @@
 - Tables a query touches: `EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON)` (plans, never executes) and collect `Schema` + `Relation Name` from the plan tree. Covers joins/subqueries/DML targets; views appear as base tables; multi-statement SQL and DDL error.
 - Modal `<dialog>` is `inset: 0`; use `height: fit-content` (not `auto`) or it stretches to max-height.
 - The bottom panel is a child of each tab's pane (state follows the tab); its height is shared via `--bottom-h` on `.main`.
-- Row shortcuts (`src/rowSql.ts`) only apply when the tab's last run is the exact SQL the app generated for one table (`tab.source.sql`); this sidesteps analysing arbitrary SQL. Keys: PK first, then unique indexes without predicate/expressions, all non-NULL in the row.
+- Row shortcuts (`src/rowSql.ts`, backend `edit_context`): eligible when EXPLAIN shows exactly one relation scan (count duplicates, so self-joins fail) and describe maps result columns to that table by (table oid, attnum), so aliases work and computed columns map to null. Reject if no column maps (views, aggregates). Only fetched after the rows are rendered, so it never delays the table. Keys: PK first, then unique indexes without predicate/expressions, all non-NULL in the row.
 - Frontend modules imported by node tests use explicit `.ts` extensions (`allowImportingTsExtensions` in tsconfig).
 - After `execCommand("insertText")` the textarea DOM is updated synchronously; set the selection immediately rather than in rAF.
 - Connection config uses explicit TOML fields rather than a libpq URL/key=value string inside a TOML string; that read as nonstandard.

@@ -16,10 +16,19 @@ export type TableMeta = { columns: ColumnMeta[]; keys: string[][] };
 
 export type TableRef = { schema: string; table: string };
 
+/**
+ * Per result column, the table column it reads directly, or null (expressions, aggregates).
+ * Aliased columns map to their real names.
+ */
+export type ResultColumns = (string | null)[];
+
+/** From the backend's edit_context: the single table a query reads, and how results map onto it. */
+export type EditContext = TableRef & TableMeta & { resultColumns: ResultColumns };
+
 const qualified = (t: TableRef) => `${quoteIdent(t.schema)}.${quoteIdent(t.table)}`;
 
 /** First key whose columns are all in the result; with a row, also all non-NULL in it. */
-export function pickKey(meta: TableMeta, columns: string[], row?: (string | null)[]): string[] | null {
+export function pickKey(meta: TableMeta, columns: ResultColumns, row?: (string | null)[]): string[] | null {
   for (const key of meta.keys) {
     const idx = key.map((k) => columns.indexOf(k));
     if (idx.some((i) => i < 0)) continue;
@@ -29,23 +38,23 @@ export function pickKey(meta: TableMeta, columns: string[], row?: (string | null
   return null;
 }
 
-function where(key: string[], columns: string[], row: (string | null)[]): string {
+function where(key: string[], columns: ResultColumns, row: (string | null)[]): string {
   return key.map((k) => `${quoteIdent(k)} = ${sqlValue(row[columns.indexOf(k)])}`).join(" AND ");
 }
 
-export function deleteSql(t: TableRef, key: string[], columns: string[], row: (string | null)[]): string {
+export function deleteSql(t: TableRef, key: string[], columns: ResultColumns, row: (string | null)[]): string {
   return `DELETE FROM ${qualified(t)} WHERE ${where(key, columns, row)};`;
 }
 
-/** UPDATE setting one column; selStart/selEnd cover the current value (inside the quotes). */
+/** UPDATE setting one column (must map to a table column); selStart/selEnd cover the current value. */
 export function updateSql(
   t: TableRef,
   key: string[],
-  columns: string[],
+  columns: ResultColumns,
   row: (string | null)[],
   col: number,
 ): { sql: string; selStart: number; selEnd: number } {
-  const prefix = `UPDATE ${qualified(t)} SET ${quoteIdent(columns[col])} = `;
+  const prefix = `UPDATE ${qualified(t)} SET ${quoteIdent(columns[col]!)} = `;
   const v = row[col];
   const value = v === null ? "NULL" : quoteLiteral(v);
   const [selStart, selEnd] = v === null ? [prefix.length, prefix.length + 4] : [prefix.length + 1, prefix.length + value.length - 1];

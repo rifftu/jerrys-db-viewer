@@ -10,7 +10,8 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
 - Each tab has a bottom panel (drag its top edge to resize; click the open tab to collapse):
   - **info**: metadata for every table the tab's last query touches (found via `EXPLAIN`, so nothing runs).
   - **edit**: write SQL, **review** shows exactly what will run and on which connection/database, **execute** runs it.
-    On tabs showing a table opened from the sidebar or an FK (query unmodified), shortcuts generate SQL for the
+    When the tab's last query reads exactly one table (WHERE / ORDER BY / LIMIT / column lists are fine; no joins),
+    shortcuts generate SQL for the
     selected cell: **delete row** / **edit value** (by primary key or unique index) and **add row** (defaults/NULLs).
 - Click a cell to select it (its row and column get a lighter tint; colors follow the system selection color).
 - With the SQL box focused, ⌥-click a header to insert `"column"`, or a cell to insert `'value'` (or `NULL`), at the cursor.

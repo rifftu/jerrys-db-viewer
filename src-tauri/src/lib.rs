@@ -329,17 +329,15 @@ fn quote_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// (schema, table) of every relation in an EXPLAIN (VERBOSE, FORMAT JSON) plan, in first-seen order.
+/// (schema, table) of every relation scan in an EXPLAIN (VERBOSE, FORMAT JSON) plan, in plan
+/// order; a table scanned twice (self-join) appears twice.
 fn plan_relations(v: &serde_json::Value, out: &mut Vec<(String, String)>) {
     match v {
         serde_json::Value::Object(m) => {
             if let (Some(schema), Some(rel)) =
                 (m.get("Schema").and_then(|x| x.as_str()), m.get("Relation Name").and_then(|x| x.as_str()))
             {
-                let r = (schema.to_string(), rel.to_string());
-                if !out.contains(&r) {
-                    out.push(r);
-                }
+                out.push((schema.to_string(), rel.to_string()));
             }
             m.values().for_each(|x| plan_relations(x, out));
         }
@@ -358,6 +356,8 @@ async fn tables_info_text(state: &AppState, connection: &str, database: &str, sq
     let plan: serde_json::Value = serde_json::from_str(&json).map_err(|e| e.to_string())?;
     let mut rels = Vec::new();
     plan_relations(&plan, &mut rels);
+    let mut seen = Vec::new();
+    rels.retain(|r| if seen.contains(r) { false } else { seen.push(r.clone()); true });
     if rels.is_empty() {
         return Ok("No tables referenced.".into());
     }
@@ -432,6 +432,8 @@ struct ColumnMeta {
     has_default: bool,
     generated: bool,
     identity: bool,
+    #[serde(skip)]
+    attnum: i16,
 }
 
 #[derive(Serialize, Debug)]
@@ -439,6 +441,8 @@ struct TableMeta {
     columns: Vec<ColumnMeta>,
     /// Column names of the primary key (first) and plain unique indexes (no predicate/expressions).
     keys: Vec<Vec<String>>,
+    #[serde(skip)]
+    oid: u32,
 }
 
 /// Columns and unique keys of one table, for generating row-level SQL. One round trip.
@@ -448,7 +452,8 @@ async fn table_meta_of(state: &AppState, connection: &str, database: &str, schem
     let sets = simple_query(
         &client,
         &format!(
-            "SELECT a.attname, t.typcategory, t.typname, a.attnotnull, a.atthasdef, a.attgenerated <> '', a.attidentity <> '' \
+            "SELECT a.attname, t.typcategory, t.typname, a.attnotnull, a.atthasdef, a.attgenerated <> '', a.attidentity <> '', \
+                    a.attrelid, a.attnum \
                FROM pg_attribute a JOIN pg_type t ON t.oid = a.atttypid \
               WHERE a.attrelid = {reg} AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum; \
              SELECT (SELECT json_agg(a.attname ORDER BY k.o) FROM unnest(i.indkey) WITH ORDINALITY k(n, o) \
@@ -474,21 +479,67 @@ async fn table_meta_of(state: &AppState, connection: &str, database: &str, schem
                 has_default: flag(r, 4),
                 generated: flag(r, 5),
                 identity: flag(r, 6),
+                attnum: text(r, 8).parse().unwrap_or(0),
             })
             .collect(),
+        oid: cols.first().and_then(|r| text(r, 7).parse().ok()).unwrap_or(0),
         keys: keys.iter().filter_map(|r| serde_json::from_str(r[0].as_deref()?).ok()).collect(),
     })
 }
 
+/// What the edit panel's row shortcuts need for a tab's last query.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct EditContext {
+    schema: String,
+    table: String,
+    #[serde(flatten)]
+    meta: TableMeta,
+    /// Per result column: the table column it reads directly (so aliases still map), or null
+    /// for anything else (expressions, aggregates).
+    result_columns: Vec<Option<String>>,
+}
+
+/// Decides whether row shortcuts can target `sql`'s results, and returns what generating the
+/// SQL needs. Allowed: one SELECT over exactly one table scan (WHERE / ORDER BY / LIMIT /
+/// column lists are fine); joins, self-joins, subqueries on other tables and views are not.
+/// Two round trips: describe + EXPLAIN pipelined (neither executes the query), then the catalog.
+async fn edit_context_of(state: &AppState, connection: &str, database: &str, sql: &str) -> Result<EditContext, String> {
+    let client = client(state, connection, database).await?;
+    let explain = format!("EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) {sql}");
+    let (stmt, plan) = tokio::join!(client.prepare(sql), simple_query(&client, &explain));
+    let stmt = stmt.map_err(|_| "Only a single SELECT statement is supported".to_string())?;
+    let plan = plan.map_err(|_| "Only a single SELECT statement is supported".to_string())?;
+    let json: String = plan.into_iter().flat_map(|s| s.rows).filter_map(|mut r| r.remove(0)).collect();
+    let mut rels = Vec::new();
+    plan_relations(&serde_json::from_str(&json).map_err(|e| e.to_string())?, &mut rels);
+    let [(schema, table)]: [(String, String); 1] = rels
+        .try_into()
+        .map_err(|_| "Only queries reading exactly one table (no joins or subqueries) are supported".to_string())?;
+    let meta = table_meta_of(state, connection, database, &schema, &table).await?;
+    let result_columns = stmt
+        .columns()
+        .iter()
+        .map(|c| {
+            let (oid, attnum) = (c.table_oid()?, c.column_id()?);
+            (oid == meta.oid).then(|| meta.columns.iter().find(|m| m.attnum == attnum).map(|m| m.name.clone()))?
+        })
+        .collect::<Vec<_>>();
+    // e.g. a view (its columns aren't the base table's) or only aggregates: not a view of rows.
+    if result_columns.iter().all(Option::is_none) {
+        return Err(format!("No result column comes directly from {schema}.{table}"));
+    }
+    Ok(EditContext { schema, table, meta, result_columns })
+}
+
 #[tauri::command]
-async fn table_meta(
+async fn edit_context(
     state: tauri::State<'_, AppState>,
     connection: String,
     database: String,
-    schema: String,
-    table: String,
-) -> Result<TableMeta, String> {
-    table_meta_of(&state, &connection, &database, &schema, &table).await
+    sql: String,
+) -> Result<EditContext, String> {
+    edit_context_of(&state, &connection, &database, &sql).await
 }
 
 #[tauri::command]
@@ -605,7 +656,7 @@ mod tests {
         // Row-SQL metadata: columns with flags, primary key first, plain unique indexes only.
         simple_query(
             &c,
-            "DROP TABLE IF EXISTS dbv_meta; \
+            "DROP TABLE IF EXISTS dbv_meta CASCADE; \
              CREATE TABLE dbv_meta (id serial PRIMARY KEY, \"we ird\" text NOT NULL, a int, b int, \
                up text GENERATED ALWAYS AS (upper(\"we ird\")) STORED, ok boolean NOT NULL, \
                UNIQUE (a, b)); \
@@ -621,6 +672,29 @@ mod tests {
         assert!(m.columns[4].generated && !m.columns[2].not_null);
         assert_eq!((m.columns[5].category.as_str(), m.columns[5].typname.as_str()), ("B", "bool"));
 
+        // Edit context: hand-written single-table queries are fine; aliases map back to columns.
+        let ctx = edit_context_of(&state, "t", "postgres", "SELECT * FROM dbv_meta WHERE a > 0 ORDER BY id DESC LIMIT 5").await.unwrap();
+        assert_eq!((ctx.schema.as_str(), ctx.table.as_str()), ("public", "dbv_meta"));
+        assert_eq!(ctx.result_columns.len(), 6);
+        assert_eq!(ctx.meta.keys[0], vec!["id".to_string()]);
+        let ctx = edit_context_of(&state, "t", "postgres", "SELECT \"we ird\" AS w, id, a + 1 AS a1 FROM dbv_meta m WHERE m.ok").await.unwrap();
+        assert_eq!(ctx.result_columns, vec![Some("we ird".to_string()), Some("id".to_string()), None]);
+        // Not allowed: joins, self-joins, subqueries on other tables, no table, several statements.
+        for bad in [
+            "SELECT m.* FROM dbv_meta m JOIN dbv_parent p ON p.pid = m.a",
+            "SELECT x.* FROM dbv_meta x JOIN dbv_meta y ON x.id = y.a",
+            "SELECT * FROM dbv_meta WHERE a IN (SELECT pid FROM dbv_parent)",
+            "SELECT 1",
+            "SELECT 1; SELECT 2",
+        ] {
+            assert!(edit_context_of(&state, "t", "postgres", bad).await.is_err(), "{bad}");
+        }
+        // A view reads its base table, but its columns don't come from that table directly; same for
+        // aggregates. Those aren't row views, so no shortcuts at all.
+        simple_query(&c, "CREATE OR REPLACE VIEW dbv_meta_v AS SELECT * FROM dbv_meta").await.unwrap();
+        assert!(edit_context_of(&state, "t", "postgres", "SELECT * FROM dbv_meta_v").await.is_err());
+        assert!(edit_context_of(&state, "t", "postgres", "SELECT count(*) FROM dbv_meta").await.is_err());
+
         // Picking another database opens a separate client connected to it.
         simple_query(&c, "DROP DATABASE IF EXISTS dbv_other").await.unwrap();
         simple_query(&c, "CREATE DATABASE dbv_other").await.unwrap();
@@ -635,7 +709,7 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, table_meta, run_query])
+        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, edit_context, run_query])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

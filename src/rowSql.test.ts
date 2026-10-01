@@ -63,3 +63,12 @@ test("insertSql skips generated columns", () => {
   };
   assert.equal(insertSql(t, meta), `INSERT INTO "public"."users" ("id", "email", "note")\nVALUES (DEFAULT, '', NULL);`);
 });
+
+test("result columns may be aliased (mapped to real names) or computed (null)", () => {
+  // e.g. SELECT "id", "email" AS e, lower(email) FROM users
+  const mapped = ["id", "email", null];
+  const r = ["5", "x@y", "x@y"];
+  assert.deepEqual(pickKey({ columns: [], keys: [["id"]] }, mapped, r), ["id"]);
+  assert.equal(updateSql(t, ["id"], mapped, r, 1).sql, `UPDATE "public"."users" SET "email" = 'x@y' WHERE "id" = '5';`);
+  assert.equal(pickKey({ columns: [], keys: [["id"]] }, [null, "email"], ["5", "x"]), null, "key column computed -> unusable");
+});

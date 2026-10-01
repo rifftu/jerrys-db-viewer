@@ -19,9 +19,6 @@ type Tab = {
   lastRunAt: number | null;
   /** SQL of the most recent run (the bottom panel's Info describes its tables). */
   lastSql: string | null;
-  /** Set when the app generated this tab's query for a single table (opened from the sidebar or an FK).
-   *  Row shortcuts in the edit panel only apply while the last run is exactly that SQL. */
-  source: { schema: string; table: string; sql: string } | null;
   /** Where this tab's queries run; independent of the sidebar and of other tabs. */
   target: Selection | null;
   sql: string;
@@ -39,13 +36,12 @@ type Tab = {
 const DEFAULT_LIMIT = 420;
 
 let nextTabId = 1;
-const makeTab = (target: Selection | null, table?: string, sql = "", source: Tab["source"] = null): Tab => ({
+const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
   id: nextTabId++,
   title: table ?? "New tab",
   fromTable: table !== undefined,
   lastRunAt: null,
   lastSql: null,
-  source,
   target,
   sql,
   results: [],
@@ -153,7 +149,7 @@ export default function App() {
   const openFk = useCallback(
     (on: Selection, fk: FkTarget, value: string) => {
       const q = `SELECT * FROM ${quoteIdent(fk.schema)}.${quoteIdent(fk.table)} WHERE ${quoteIdent(fk.column)} = ${quoteLiteral(value)} LIMIT ${DEFAULT_LIMIT}`;
-      const tab = makeTab(on, fk.table, q, { schema: fk.schema, table: fk.table, sql: q });
+      const tab = makeTab(on, fk.table, q);
       setTabs((ts) => [...ts, tab]);
       setActiveId(tab.id);
       run(tab.id, on, q);
@@ -187,11 +183,11 @@ export default function App() {
     const q = `SELECT * FROM ${quoteIdent(t.schema)}.${quoteIdent(t.name)} LIMIT ${DEFAULT_LIMIT}`;
     let tabId = activeId;
     if (inNewTab) {
-      const tab = makeTab(sel, t.name, q, { schema: t.schema, table: t.name, sql: q });
+      const tab = makeTab(sel, t.name, q);
       tabId = tab.id;
       setTabs((ts) => [...ts, tab]);
     } else {
-      updateTab(tabId, { target: sel, title: t.name, fromTable: true, sql: q, source: { schema: t.schema, table: t.name, sql: q } });
+      updateTab(tabId, { target: sel, title: t.name, fromTable: true, sql: q });
     }
     setActiveId(tabId);
     run(tabId, sel, q);
@@ -345,15 +341,9 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
     const s = selection.current;
     return s && s.run === resultsRun.current ? s : null;
   }, []);
-  // Row shortcuts only for an unmodified app-generated single-table query whose results are shown.
-  const editTable = useMemo(
-    () =>
-      tab.source && tab.lastSql === tab.source.sql && tab.resultsRun > 0 && !tab.error
-        ? { schema: tab.source.schema, table: tab.source.table }
-        : null,
-    [tab.source, tab.lastSql, tab.resultsRun, tab.error],
-  );
-  const resultColumns = results.length === 1 ? results[0].columns : null;
+  // The last run's rows are on screen (one result set with columns). The edit panel only asks
+  // the backend about the query after this, so it never delays showing the table.
+  const rowsShown = !busy && !error && tab.resultsRun > 0 && results.length === 1 && results[0].columns.length > 0;
   // Option-click insert: only while this tab's SQL box has focus. Returns whether it inserted,
   // so the caller knows to cancel the mousedown (which keeps focus and the cursor here).
   const insertSql = useCallback(
@@ -409,8 +399,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
         lastSql={tab.lastSql}
         connection={connection}
         onReview={onReview}
-        editTable={editTable}
-        resultColumns={resultColumns}
+        rowsShown={rowsShown}
         getSelection={getSelection}
       />
     </div>

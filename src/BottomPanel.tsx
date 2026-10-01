@@ -3,7 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Connection, ResultSet, Selection } from "./types";
 import type { Review } from "./ReviewDialog";
-import { deleteSql, insertSql, pickKey, updateSql, type TableMeta, type TableRef } from "./rowSql.ts";
+import { deleteSql, insertSql, pickKey, updateSql, type EditContext } from "./rowSql.ts";
 
 type Props = {
   /** The owning tab is the visible one (Info only fetches then). */
@@ -13,10 +13,8 @@ type Props = {
   lastSql: string | null;
   connection: Connection | undefined;
   onReview: (review: Review) => void;
-  /** Table for row shortcuts, or null when the tab's results aren't an unmodified single-table query. */
-  editTable: TableRef | null;
-  /** Column names of the shown result (single result set), for mapping the selected row. */
-  resultColumns: string[] | null;
+  /** The last run's rows are on screen (single result set). Row shortcuts only look at the query then. */
+  rowsShown: boolean;
   /** The tab's selected cell (read on click; selecting doesn't re-render this panel). */
   getSelection: () => { values: (string | null)[]; col: number } | null;
 };
@@ -55,8 +53,7 @@ export const BottomPanel = memo(function BottomPanel({
   lastSql,
   connection,
   onReview,
-  editTable,
-  resultColumns,
+  rowsShown,
   getSelection,
 }: Props) {
   const [panel, setPanel] = useState<"info" | "edit">("info");
@@ -65,29 +62,34 @@ export const BottomPanel = memo(function BottomPanel({
   const [editSql, setEditSql] = useState("");
   const [execResult, setExecResult] = useState<{ ok: boolean; text: string } | null>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
-  const [meta, setMeta] = useState<{ key: string; meta: TableMeta | null; error?: string } | null>(null);
+  const [edit, setEdit] = useState<{ key: string; ctx: EditContext | null; error?: string } | null>(null);
 
-  // Row shortcuts need the table's columns and unique keys: fetched while Edit is visible, cached per table.
-  const metaKey = target && editTable ? [target.conn, target.db, editTable.schema, editTable.table].join("\u0000") : null;
+  // Row shortcuts: the backend checks the last query reads exactly one table and maps result columns
+  // onto it (describe + EXPLAIN, nothing executes). Only asked once its rows are on screen, only while
+  // Edit is visible; cached until the tab runs a different query.
+  const editKey = target && lastSql && rowsShown ? `${target.conn}\u0000${target.db}\u0000${lastSql}` : null;
   const editVisible = active && !collapsed && panel === "edit";
   useEffect(() => {
-    if (!editVisible || !metaKey || !target || !editTable || meta?.key === metaKey) return;
+    if (!editVisible || !editKey || !target || !lastSql || edit?.key === editKey) return;
     let stale = false;
-    invoke<TableMeta>("table_meta", { connection: target.conn, database: target.db, schema: editTable.schema, table: editTable.table })
-      .then((m) => !stale && setMeta({ key: metaKey, meta: m }))
-      .catch((e) => !stale && setMeta({ key: metaKey, meta: null, error: String(e) }));
+    invoke<EditContext>("edit_context", { connection: target.conn, database: target.db, sql: lastSql })
+      .then((ctx) => !stale && setEdit({ key: editKey, ctx }))
+      .catch((e) => !stale && setEdit({ key: editKey, ctx: null, error: String(e) }));
     return () => {
       stale = true;
     };
-  }, [editVisible, metaKey]);
-  const tableMeta = editTable && meta?.key === metaKey ? meta.meta : null;
-  const hasKey = !!(tableMeta && resultColumns && pickKey(tableMeta, resultColumns));
-  const shortcutsOff = !editTable
-    ? "Only for tabs showing a table opened from the sidebar or an FK, with that query unmodified"
-    : !tableMeta
-      ? (meta?.error ?? "Loading table metadata…")
+  }, [editVisible, editKey]);
+  const ctx = edit?.key === editKey ? edit.ctx : null;
+  const hasKey = !!(ctx && pickKey(ctx, ctx.resultColumns));
+  const shortcutsOff = !editKey
+    ? "Run a query on a single table first"
+    : !ctx
+      ? edit?.key === editKey
+        ? (edit.error ?? "Not available for this query")
+        : "Checking the query…"
       : null;
-  const rowShortcutsOff = shortcutsOff ?? (hasKey ? null : "Table has no primary key or plain unique index in the result");
+  const rowShortcutsOff =
+    shortcutsOff ?? (hasKey ? null : `No primary key or plain unique index of ${ctx!.table} is in the result columns`);
 
   /** Replace the edit box with generated SQL (undoable), then focus it with an optional selection. */
   function fill(sql: string, sel?: [number, number]) {
@@ -110,13 +112,16 @@ export const BottomPanel = memo(function BottomPanel({
   }
 
   function rowShortcut(kind: "delete" | "edit") {
-    if (!editTable || !tableMeta || !resultColumns) return;
+    if (!ctx) return;
     const s = getSelection();
     if (!s) return setExecResult({ ok: false, text: "Select a cell first." });
-    const key = pickKey(tableMeta, resultColumns, s.values);
+    const key = pickKey(ctx, ctx.resultColumns, s.values);
     if (!key) return setExecResult({ ok: false, text: "The selected row has NULL in every unique key; it can't be targeted." });
-    if (kind === "delete") return fill(deleteSql(editTable, key, resultColumns, s.values));
-    const u = updateSql(editTable, key, resultColumns, s.values, s.col);
+    if (kind === "delete") return fill(deleteSql(ctx, key, ctx.resultColumns, s.values));
+    if (ctx.resultColumns[s.col] === null) {
+      return setExecResult({ ok: false, text: `That column isn't a column of ${ctx.table} (it's computed), so it can't be edited.` });
+    }
+    const u = updateSql(ctx, key, ctx.resultColumns, s.values, s.col);
     fill(u.sql, [u.selStart, u.selEnd]);
   }
 
@@ -191,7 +196,7 @@ export const BottomPanel = memo(function BottomPanel({
             <button
               disabled={!!shortcutsOff}
               title={shortcutsOff ?? "INSERT a new row"}
-              onClick={() => editTable && tableMeta && fill(insertSql(editTable, tableMeta))}
+              onClick={() => ctx && fill(insertSql(ctx, ctx))}
             >
               add row
             </button>
