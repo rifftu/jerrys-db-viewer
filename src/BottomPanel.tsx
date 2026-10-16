@@ -78,7 +78,7 @@ export const BottomPanel = memo(function BottomPanel({
   rowsShown,
   getSelection,
 }: Props) {
-  const [panel, setPanel] = useState<PanelTab>("info");
+  const [panel, setPanel] = useState<PanelTab>("relations");
   const [collapsed, setCollapsed] = useState(false);
   const [editSql, setEditSql] = useState("");
   const [execResult, setExecResult] = useState<{ ok: boolean; text: string } | null>(null);
@@ -184,7 +184,7 @@ export const BottomPanel = memo(function BottomPanel({
     <div className={collapsed ? "bottom collapsed" : "bottom"}>
       {!collapsed && <div className="bottom-resize" onPointerDown={startResize} />}
       <div className="bottom-tabs">
-        {(["info", "relations", "edit"] as const).map((p) => (
+        {(["relations", "info", "edit"] as const).map((p) => (
           <button key={p} className={p === panel ? "active" : undefined} onClick={() => pick(p)}>
             {p}
           </button>

@@ -603,19 +603,24 @@ async fn relations_text(state: &AppState, connection: &str, database: &str, sql:
         _ => "",
     };
 
-    let mut out = format!("{schema}.{table}\n\nparents (this table references):\n");
+    // public tables by bare name; other schemas keep their prefix so same-named tables stay distinct.
+    let name = |r: &Vec<Option<String>>| match v(r, 1).as_str() {
+        "public" => v(r, 2),
+        s => format!("{s}.{}", v(r, 2)),
+    };
+    let mut out = format!("{schema}.{table}\n\nparents:\n");
     if parents.is_empty() {
         out.push_str("  (none)\n");
     }
     for r in &parents {
-        out.push_str(&format!("  {} → {}.{}({})   [{}{}]\n", list(r, 3), v(r, 1), v(r, 2), list(r, 4), v(r, 0), on_delete(r)));
+        out.push_str(&format!("  {} → {}[{}]   [{}{}]\n", list(r, 3), name(r), list(r, 4), v(r, 0), on_delete(r)));
     }
-    out.push_str("\nchildren (reference this table):\n");
+    out.push_str("\nchildren:\n");
     if children.is_empty() {
         out.push_str("  (none)\n");
     }
     for r in &children {
-        out.push_str(&format!("  {}.{}({}) → {}   [{}{}]\n", v(r, 1), v(r, 2), list(r, 3), list(r, 4), v(r, 0), on_delete(r)));
+        out.push_str(&format!("  {}[{}] → {}   [{}{}]\n", name(r), list(r, 3), list(r, 4), v(r, 0), on_delete(r)));
     }
     Ok(out)
 }
@@ -741,10 +746,10 @@ mod tests {
         // Relations: single-table queries only (a self-join is one table); both directions.
         let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent WHERE pid > 0 ORDER BY pid LIMIT 5").await.unwrap();
         assert!(r.starts_with("public.dbv_parent"), "{r}");
-        assert!(r.contains("children (reference this table):\n  public.dbv_child(parent_id) → pid   [dbv_child_parent_id_fkey]"), "{r}");
-        assert!(r.contains("parents (this table references):\n  (none)"), "{r}");
+        assert!(r.contains("children:\n  dbv_child[parent_id] → pid   [dbv_child_parent_id_fkey]"), "{r}");
+        assert!(r.contains("parents:\n  (none)"), "{r}");
         let r = relations_text(&state, "t", "postgres", "SELECT a.* FROM dbv_child a JOIN dbv_child b ON a.id = b.id").await.unwrap();
-        assert!(r.contains("parent_id → public.dbv_parent(pid)   [dbv_child_parent_id_fkey]"), "{r}");
+        assert!(r.contains("parent_id → dbv_parent[pid]   [dbv_child_parent_id_fkey]"), "{r}");
         assert!(relations_text(&state, "t", "postgres", "SELECT * FROM dbv_child c JOIN dbv_parent p ON p.pid = c.parent_id").await.is_err());
         assert_eq!(relations_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
         // ON DELETE actions are shown; a partitioned child's FK appears once, not once per partition.
@@ -759,8 +764,15 @@ mod tests {
         .await
         .unwrap();
         let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent").await.unwrap();
-        assert!(r.contains("public.dbv_grand(p) → pid   [dbv_grand_p_fkey, on delete cascade]"), "{r}");
-        assert!(r.contains("public.dbv_part(p) → pid"), "{r}");
+        assert!(r.contains("dbv_grand[p] → pid   [dbv_grand_p_fkey, on delete cascade]"), "{r}");
+        assert!(r.contains("dbv_part[p] → pid"), "{r}");
+        // Non-public schemas keep their prefix.
+        simple_query(&c, "CREATE SCHEMA IF NOT EXISTS dbv_s; DROP TABLE IF EXISTS dbv_s.kid; \
+                          CREATE TABLE dbv_s.kid (id int, p int REFERENCES dbv_parent (pid))")
+            .await
+            .unwrap();
+        let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent").await.unwrap();
+        assert!(r.contains("dbv_s.kid[p] → pid   [kid_p_fkey]"), "{r}");
         assert!(!r.contains("dbv_part_1") && !r.contains("dbv_part_2"), "{r}");        assert!(info.starts_with("public.dbv_parent"), "{info}");
         assert_eq!(tables_info_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
         assert!(tables_info_text(&state, "t", "postgres", "SELECT 1; SELECT 2").await.is_err());
