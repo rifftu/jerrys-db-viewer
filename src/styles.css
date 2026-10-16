@@ -68,6 +68,13 @@ body { background: var(--bg); color: var(--fg); }
 
 .tables li:hover { background: var(--hover); }
 
+/* Non-public schemas collapse into folders; their tables are indented under them. */
+.tables li.folder { color: var(--muted); }
+
+.tables li.folder .caret { display: inline-block; width: 12px; }
+
+.tables li.nested { padding-left: 26px; }
+
 .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 .tabbar {

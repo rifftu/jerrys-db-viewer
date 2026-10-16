@@ -4,12 +4,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { tabLabels } from "./tabLabels";
 import { ResultTable } from "./ResultTable";
 import { CellDialog, type CellDialogHandle } from "./CellDialog";
-import type { Connection, FkTarget, ResultSet, Selection } from "./types";
+import type { Connection, FkTarget, ResultSet, Selection, Table } from "./types";
+import { TableList } from "./TableList";
 import { BottomPanel } from "./BottomPanel";
 import { ReviewDialog, type Review, type ReviewDialogHandle } from "./ReviewDialog";
 import { quoteIdent, quoteLiteral } from "./sql";
 
-type Table = { schema: string; name: string };
 type Tab = {
   id: number;
   title: string;
@@ -259,19 +259,8 @@ export default function App() {
           </select>
         )}
         {sidebarError && <pre className="error">{sidebarError}</pre>}
-        <ul className="tables">
-          {tables.map((t) => (
-            <li
-              key={`${t.schema}.${t.name}`}
-              title={`${t.schema}.${t.name} — double-click to open, ⌘-click to open in a new tab`}
-              onDoubleClick={(e) => !(e.metaKey || e.ctrlKey) && openTable(t, false)}
-              // detail === 1 so a ⌘-double-click doesn't open two tabs.
-              onClick={(e) => (e.metaKey || e.ctrlKey) && e.detail === 1 && openTable(t, true)}
-            >
-              {t.schema === "public" ? t.name : `${t.schema}.${t.name}`}
-            </li>
-          ))}
-        </ul>
+        {/* Keyed by selection so folders start collapsed on every connection/database change. */}
+        <TableList key={sel ? `${sel.conn}\u0000${sel.db}` : ""} tables={tables} onOpen={openTable} />
       </aside>
       <div className="divider" onPointerDown={startPaneDrag} />
       <main className="main">
