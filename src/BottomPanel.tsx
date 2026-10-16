@@ -42,6 +42,28 @@ function startResize(e: ReactPointerEvent<HTMLDivElement>) {
   window.addEventListener("pointerup", up);
 }
 
+/**
+ * Text from a backend command about the tab's last query (Info, Relations). Fetched only while
+ * visible; cached until the tab runs a different query. Errors are shown as the text.
+ */
+function useQueryDump(command: string, visible: boolean, target: Selection | null, lastSql: string | null): string | null {
+  const [dump, setDump] = useState<{ key: string; text: string } | null>(null);
+  const key = target && lastSql ? `${target.conn}\u0000${target.db}\u0000${lastSql}` : null;
+  useEffect(() => {
+    if (!visible || !key || !target || !lastSql || dump?.key === key) return;
+    let stale = false;
+    invoke<string>(command, { connection: target.conn, database: target.db, sql: lastSql })
+      .then((text) => !stale && setDump({ key, text }))
+      .catch((e) => !stale && setDump({ key, text: String(e) }));
+    return () => {
+      stale = true;
+    };
+  }, [visible, key]);
+  return dump?.key === key ? dump.text : null;
+}
+
+type PanelTab = "info" | "relations" | "edit";
+
 function summarize(sets: ResultSet[]): string {
   return sets.map((s) => (s.columns.length ? `${s.rows.length} row(s) returned` : `${s.affected} row(s) affected`)).join("; ") || "done";
 }
@@ -56,9 +78,8 @@ export const BottomPanel = memo(function BottomPanel({
   rowsShown,
   getSelection,
 }: Props) {
-  const [panel, setPanel] = useState<"info" | "edit">("info");
+  const [panel, setPanel] = useState<PanelTab>("info");
   const [collapsed, setCollapsed] = useState(false);
-  const [info, setInfo] = useState<{ key: string; text: string } | null>(null);
   const [editSql, setEditSql] = useState("");
   const [execResult, setExecResult] = useState<{ ok: boolean; text: string } | null>(null);
   const editRef = useRef<HTMLTextAreaElement>(null);
@@ -130,19 +151,9 @@ export const BottomPanel = memo(function BottomPanel({
     fill(u.sql, [u.selStart, u.selEnd]);
   }
 
-  // Info: fetched only while visible, cached until the tab runs a different query.
-  const infoKey = target && lastSql ? `${target.conn}\u0000${target.db}\u0000${lastSql}` : null;
-  const infoVisible = active && !collapsed && panel === "info";
-  useEffect(() => {
-    if (!infoVisible || !infoKey || !target || !lastSql || info?.key === infoKey) return;
-    let stale = false;
-    invoke<string>("tables_info", { connection: target.conn, database: target.db, sql: lastSql })
-      .then((text) => !stale && setInfo({ key: infoKey, text }))
-      .catch((e) => !stale && setInfo({ key: infoKey, text: String(e) }));
-    return () => {
-      stale = true;
-    };
-  }, [infoVisible, infoKey]);
+  const shown = (p: PanelTab) => active && !collapsed && panel === p;
+  const info = useQueryDump("tables_info", shown("info"), target, lastSql);
+  const relations = useQueryDump("table_relations", shown("relations"), target, lastSql);
 
   function review() {
     if (!target || !editSql.trim()) return;
@@ -160,7 +171,7 @@ export const BottomPanel = memo(function BottomPanel({
     });
   }
 
-  const pick = (p: "info" | "edit") => {
+  const pick = (p: PanelTab) => {
     // Clicking the open tab collapses/expands the panel.
     if (p === panel) setCollapsed((c) => !c);
     else {
@@ -173,15 +184,15 @@ export const BottomPanel = memo(function BottomPanel({
     <div className={collapsed ? "bottom collapsed" : "bottom"}>
       {!collapsed && <div className="bottom-resize" onPointerDown={startResize} />}
       <div className="bottom-tabs">
-        {(["info", "edit"] as const).map((p) => (
+        {(["info", "relations", "edit"] as const).map((p) => (
           <button key={p} className={p === panel ? "active" : undefined} onClick={() => pick(p)}>
             {p}
           </button>
         ))}
       </div>
-      {!collapsed && panel === "info" && (
+      {!collapsed && (panel === "info" || panel === "relations") && (
         <pre className="bottom-body info-dump">
-          {!lastSql ? "Run a query to see its tables." : info?.key === infoKey ? info.text : "Loading…"}
+          {!lastSql ? "Run a query to see its tables." : ((panel === "info" ? info : relations) ?? "Loading…")}
         </pre>
       )}
       {!collapsed && panel === "edit" && (

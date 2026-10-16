@@ -545,6 +545,91 @@ async fn edit_context(
     edit_context_of(&state, &connection, &database, &sql).await
 }
 
+/// Plain-text FK relations of the single table `sql` reads: parents (tables it references) and
+/// children (tables referencing it). Queries reading several distinct tables are rejected (a
+/// self-join is one table). Two round trips: the EXPLAIN (planned, not executed), then one batched
+/// catalog query. Per-partition clones of FKs (conparentid <> 0) are skipped so each FK shows once.
+async fn relations_text(state: &AppState, connection: &str, database: &str, sql: &str) -> Result<String, String> {
+    let client = client(state, connection, database).await?;
+    let plan = simple_query(&client, &format!("EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) {sql}")).await?;
+    let json: String = plan.into_iter().flat_map(|s| s.rows).filter_map(|mut r| r.remove(0)).collect();
+    let mut rels = Vec::new();
+    plan_relations(&serde_json::from_str(&json).map_err(|e| e.to_string())?, &mut rels);
+    rels.dedup();
+    let mut distinct = rels.clone();
+    distinct.sort();
+    distinct.dedup();
+    let (schema, table) = match distinct.as_slice() {
+        [] => return Ok("No tables referenced.".into()),
+        [one] => one.clone(),
+        _ => return Err("Relations are only shown for queries reading a single table.".into()),
+    };
+    let reg = format!("{}::regclass", quote_literal(&format!("{}.{}", quote_ident(&schema), quote_ident(&table))));
+    // Column names of a constraint side, in key order, as JSON (safe for odd names).
+    let cols = |rel: &str, key: &str| {
+        format!(
+            "(SELECT json_agg(a.attname ORDER BY k.o) FROM unnest(c.{key}) WITH ORDINALITY k(n, o) \
+               JOIN pg_attribute a ON a.attrelid = c.{rel} AND a.attnum = k.n)"
+        )
+    };
+    let sets = simple_query(
+        &client,
+        &format!(
+            "SELECT c.conname, n.nspname, t.relname, {}, {}, c.confdeltype \
+               FROM pg_constraint c JOIN pg_class t ON t.oid = c.confrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+              WHERE c.contype = 'f' AND c.conparentid = 0 AND c.conrelid = {reg} ORDER BY 2, 3, 1; \
+             SELECT c.conname, n.nspname, t.relname, {}, {}, c.confdeltype \
+               FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
+              WHERE c.contype = 'f' AND c.conparentid = 0 AND c.confrelid = {reg} ORDER BY 2, 3, 1",
+            cols("conrelid", "conkey"),
+            cols("confrelid", "confkey"),
+            cols("conrelid", "conkey"),
+            cols("confrelid", "confkey"),
+        ),
+    )
+    .await?;
+    let [parents, children]: [Vec<Vec<Option<String>>>; 2] =
+        sets.into_iter().map(|s| s.rows).collect::<Vec<_>>().try_into().map_err(|_| "unexpected catalog result")?;
+    let v = |r: &Vec<Option<String>>, i: usize| r[i].clone().unwrap_or_default();
+    let list = |r: &Vec<Option<String>>, i: usize| -> String {
+        serde_json::from_str::<Vec<String>>(r[i].as_deref().unwrap_or("[]")).unwrap_or_default().join(", ")
+    };
+    // confdeltype: a = no action (default), r = restrict, c = cascade, n = set null, d = set default.
+    let on_delete = |r: &Vec<Option<String>>| match v(r, 5).as_str() {
+        "r" => ", on delete restrict",
+        "c" => ", on delete cascade",
+        "n" => ", on delete set null",
+        "d" => ", on delete set default",
+        _ => "",
+    };
+
+    let mut out = format!("{schema}.{table}\n\nparents (this table references):\n");
+    if parents.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for r in &parents {
+        out.push_str(&format!("  {} → {}.{}({})   [{}{}]\n", list(r, 3), v(r, 1), v(r, 2), list(r, 4), v(r, 0), on_delete(r)));
+    }
+    out.push_str("\nchildren (reference this table):\n");
+    if children.is_empty() {
+        out.push_str("  (none)\n");
+    }
+    for r in &children {
+        out.push_str(&format!("  {}.{}({}) → {}   [{}{}]\n", v(r, 1), v(r, 2), list(r, 3), list(r, 4), v(r, 0), on_delete(r)));
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+async fn table_relations(
+    state: tauri::State<'_, AppState>,
+    connection: String,
+    database: String,
+    sql: String,
+) -> Result<String, String> {
+    relations_text(&state, &connection, &database, &sql).await
+}
+
 #[tauri::command]
 async fn tables_info(
     state: tauri::State<'_, AppState>,
@@ -622,7 +707,7 @@ mod tests {
         // FK links: cache is filled by listing tables, then describe maps result columns to it.
         simple_query(
             &c,
-            "DROP TABLE IF EXISTS dbv_child, dbv_parent; DROP TYPE IF EXISTS dbv_mood; \
+            "DROP TABLE IF EXISTS dbv_child, dbv_parent CASCADE; DROP TYPE IF EXISTS dbv_mood; \
              CREATE TYPE dbv_mood AS ENUM ('ok'); \
              CREATE TABLE dbv_parent (pid int PRIMARY KEY, label text); \
              CREATE TABLE dbv_child (id int, parent_id int REFERENCES dbv_parent (pid), mood dbv_mood)",
@@ -652,7 +737,31 @@ mod tests {
         assert!(info.contains("FOREIGN KEY (parent_id) REFERENCES dbv_parent(pid)"), "{info}");
         assert!(info.contains("CREATE UNIQUE INDEX dbv_parent_pkey"), "{info}");
         let info = tables_info_text(&state, "t", "postgres", "UPDATE dbv_parent SET label = 'x' WHERE pid = 1").await.unwrap();
-        assert!(info.starts_with("public.dbv_parent"), "{info}");
+
+        // Relations: single-table queries only (a self-join is one table); both directions.
+        let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent WHERE pid > 0 ORDER BY pid LIMIT 5").await.unwrap();
+        assert!(r.starts_with("public.dbv_parent"), "{r}");
+        assert!(r.contains("children (reference this table):\n  public.dbv_child(parent_id) → pid   [dbv_child_parent_id_fkey]"), "{r}");
+        assert!(r.contains("parents (this table references):\n  (none)"), "{r}");
+        let r = relations_text(&state, "t", "postgres", "SELECT a.* FROM dbv_child a JOIN dbv_child b ON a.id = b.id").await.unwrap();
+        assert!(r.contains("parent_id → public.dbv_parent(pid)   [dbv_child_parent_id_fkey]"), "{r}");
+        assert!(relations_text(&state, "t", "postgres", "SELECT * FROM dbv_child c JOIN dbv_parent p ON p.pid = c.parent_id").await.is_err());
+        assert_eq!(relations_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
+        // ON DELETE actions are shown; a partitioned child's FK appears once, not once per partition.
+        simple_query(
+            &c,
+            "DROP TABLE IF EXISTS dbv_grand, dbv_part; \
+             CREATE TABLE dbv_grand (id int, p int REFERENCES dbv_parent (pid) ON DELETE CASCADE); \
+             CREATE TABLE dbv_part (id int, p int REFERENCES dbv_parent (pid)) PARTITION BY RANGE (id); \
+             CREATE TABLE dbv_part_1 PARTITION OF dbv_part FOR VALUES FROM (0) TO (10); \
+             CREATE TABLE dbv_part_2 PARTITION OF dbv_part FOR VALUES FROM (10) TO (20)",
+        )
+        .await
+        .unwrap();
+        let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent").await.unwrap();
+        assert!(r.contains("public.dbv_grand(p) → pid   [dbv_grand_p_fkey, on delete cascade]"), "{r}");
+        assert!(r.contains("public.dbv_part(p) → pid"), "{r}");
+        assert!(!r.contains("dbv_part_1") && !r.contains("dbv_part_2"), "{r}");        assert!(info.starts_with("public.dbv_parent"), "{info}");
         assert_eq!(tables_info_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
         assert!(tables_info_text(&state, "t", "postgres", "SELECT 1; SELECT 2").await.is_err());
 
@@ -713,7 +822,7 @@ mod tests {
 pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, edit_context, run_query])
+        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, table_relations, edit_context, run_query])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

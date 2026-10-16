@@ -10,6 +10,8 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
   double-click its right edge to restore the default width. Widths reset on re-query.
 - Each tab has a bottom panel (drag its top edge to resize; click the open tab to collapse):
   - **info**: metadata for every table the tab's last query touches (found via `EXPLAIN`, so nothing runs).
+  - **relations**: for a query reading a single table, its FK parents (tables it references) and children
+    (tables referencing it), with ON DELETE actions.
   - **edit**: write SQL, **review** shows exactly what will run and on which connection/database, **execute** runs it.
     When the tab's last query reads exactly one table (WHERE / ORDER BY / LIMIT / column lists are fine; no joins),
     shortcuts generate SQL for the
