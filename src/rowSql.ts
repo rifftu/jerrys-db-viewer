@@ -1,4 +1,4 @@
-import { quoteIdent, quoteLiteral, sqlValue } from "./sql.ts";
+import { DEFAULT_LIMIT, quoteIdent, quoteLiteral, sqlValue } from "./sql.ts";
 
 export type ColumnMeta = {
   name: string;
@@ -124,4 +124,34 @@ export function editRowSql(t: TableRef, meta: TableMeta, key: string[], columns:
   });
   if (!items.length) return null;
   return `UPDATE ${qualified(t)} SET\n${annotatedLines(items)}\nWHERE ${where(key, columns, row)};`;
+}
+
+/** An FK between the queried table and another. `cols` are the queried table's, `otherCols` the other's. */
+export type Relation = {
+  constraint: string;
+  schema: string;
+  table: string;
+  cols: string[];
+  otherCols: string[];
+  onDelete: string | null;
+};
+
+/** From the backend's table_relations. */
+export type Relations = TableRef & { parents: Relation[]; children: Relation[]; resultColumns: ResultColumns };
+
+/** Why a relation can never be followed from these results, or null if it can. */
+export function relationBlocked(rel: Relation, columns: ResultColumns): string | null {
+  const missing = rel.cols.filter((c) => !columns.includes(c));
+  return missing.length ? `The results don't include ${missing.join(", ")}` : null;
+}
+
+/** SELECT of the other table's rows linked to `row` through `rel`, or why it can't be built. */
+export function relatedQuery(rel: Relation, columns: ResultColumns, row: (string | null)[]): { sql: string } | { error: string } {
+  const blocked = relationBlocked(rel, columns);
+  if (blocked) return { error: blocked };
+  const values = rel.cols.map((c) => row[columns.indexOf(c)]);
+  const nulls = rel.cols.filter((_, i) => values[i] === null);
+  if (nulls.length) return { error: `The selected row has NULL ${nulls.join(", ")}, so nothing is linked` };
+  const where = rel.otherCols.map((c, i) => `${quoteIdent(c)} = ${quoteLiteral(values[i]!)}`).join(" AND ");
+  return { sql: `SELECT * FROM ${qualified(rel)} WHERE ${where} LIMIT ${DEFAULT_LIMIT}` };
 }

@@ -8,7 +8,7 @@ import type { Connection, FkTarget, ResultSet, Selection, Table } from "./types"
 import { TableList } from "./TableList";
 import { BottomPanel } from "./BottomPanel";
 import { ReviewDialog, type Review, type ReviewDialogHandle } from "./ReviewDialog";
-import { quoteIdent, quoteLiteral } from "./sql";
+import { DEFAULT_LIMIT, quoteIdent, quoteLiteral } from "./sql";
 
 type Tab = {
   id: number;
@@ -32,8 +32,6 @@ type Tab = {
   fks: { run: number; cols: (FkTarget | null)[] } | null;
 };
 
-/** Row limit for generated queries (opening a table, following an FK). */
-const DEFAULT_LIMIT = 420;
 
 let nextTabId = 1;
 const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
@@ -146,15 +144,25 @@ export default function App() {
     [updateTab],
   );
 
-  const openFk = useCallback(
-    (on: Selection, fk: FkTarget, value: string) => {
-      const q = `SELECT * FROM ${quoteIdent(fk.schema)}.${quoteIdent(fk.table)} WHERE ${quoteIdent(fk.column)} = ${quoteLiteral(value)} LIMIT ${DEFAULT_LIMIT}`;
-      const tab = makeTab(on, fk.table, q);
+  /** Open a new tab titled `table` on `on`, running `sql`. */
+  const openQueryTab = useCallback(
+    (on: Selection, table: string, sql: string) => {
+      const tab = makeTab(on, table, sql);
       setTabs((ts) => [...ts, tab]);
       setActiveId(tab.id);
-      run(tab.id, on, q);
+      run(tab.id, on, sql);
     },
     [run],
+  );
+
+  const openFk = useCallback(
+    (on: Selection, fk: FkTarget, value: string) =>
+      openQueryTab(
+        on,
+        fk.table,
+        `SELECT * FROM ${quoteIdent(fk.schema)}.${quoteIdent(fk.table)} WHERE ${quoteIdent(fk.column)} = ${quoteLiteral(value)} LIMIT ${DEFAULT_LIMIT}`,
+      ),
+    [openQueryTab],
   );
 
   // Labels depend only on these fields, so recompute when they change — not on every keystroke or result.
@@ -291,7 +299,7 @@ export default function App() {
         </div>
         {/* Background tabs stay mounted (hidden) so switching is instant and keeps scroll position. */}
         {tabs.map((t) => (
-          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} onOpenFk={openFk} onInspect={inspect}
+          <TabPane key={t.id} tab={t} active={t.id === activeId} onSqlChange={setSql} onRun={run} onOpenFk={openFk} onInspect={inspect} onOpenTab={openQueryTab}
             connection={connections.find((c) => c.name === t.target?.conn)} onReview={review} />
         ))}
       </main>
@@ -310,10 +318,11 @@ type TabPaneProps = {
   onInspect: (value: string) => void;
   connection: Connection | undefined;
   onReview: (review: Review) => void;
+  onOpenTab: (on: Selection, table: string, sql: string) => void;
 };
 
 // Memoized so typing in or running one tab doesn't re-render other tabs' result tables.
-const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenFk, onInspect, connection, onReview }: TabPaneProps) {
+const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenFk, onInspect, connection, onReview, onOpenTab }: TabPaneProps) {
   const { target, results, error, busy, elapsed } = tab;
   // Only trust FK info describing the run whose results are shown; describe works on single statements.
   const colFks = tab.fks && tab.fks.run === tab.resultsRun && results.length === 1 ? tab.fks.cols : null;
@@ -323,9 +332,16 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
   const selection = useRef<{ run: number; values: (string | null)[]; col: number } | null>(null);
   const resultsRun = useRef(tab.resultsRun);
   resultsRun.current = tab.resultsRun;
+  // data-has-sel on the pane lets CSS un-grey selection-dependent controls (relation arrows)
+  // without re-rendering; cleared when a new run replaces the results.
+  const paneRef = useRef<HTMLDivElement>(null);
   const onSelect = useCallback((s: { values: (string | null)[]; col: number }) => {
     selection.current = { run: resultsRun.current, ...s };
+    if (paneRef.current) paneRef.current.dataset.hasSel = "";
   }, []);
+  useEffect(() => {
+    if (paneRef.current) delete paneRef.current.dataset.hasSel;
+  }, [tab.resultsRun]);
   const getSelection = useCallback(() => {
     const s = selection.current;
     return s && s.run === resultsRun.current ? s : null;
@@ -349,7 +365,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
     [tab.id, onSqlChange],
   );
   return (
-    <div className="pane" hidden={!active}>
+    <div className="pane" hidden={!active} ref={paneRef}>
       <textarea
         ref={sqlRef}
         className="sql"
@@ -390,6 +406,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
         onReview={onReview}
         rowsShown={rowsShown}
         getSelection={getSelection}
+        onOpenTab={onOpenTab}
       />
     </div>
   );

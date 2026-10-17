@@ -545,22 +545,49 @@ async fn edit_context(
     edit_context_of(&state, &connection, &database, &sql).await
 }
 
-/// Plain-text FK relations of the single table `sql` reads: parents (tables it references) and
-/// children (tables referencing it). Queries reading several distinct tables are rejected (a
-/// self-join is one table). Two round trips: the EXPLAIN (planned, not executed), then one batched
-/// catalog query. Per-partition clones of FKs (conparentid <> 0) are skipped so each FK shows once.
-async fn relations_text(state: &AppState, connection: &str, database: &str, sql: &str) -> Result<String, String> {
+/// One FK between the queried table and another table. `cols` are always the queried table's
+/// columns and `other_cols` the other table's (same order), so following it from a row is
+/// `SELECT * FROM other WHERE other_cols[i] = row[cols[i]]` in either direction.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct Relation {
+    constraint: String,
+    schema: String,
+    table: String,
+    cols: Vec<String>,
+    other_cols: Vec<String>,
+    /// "cascade" / "restrict" / "set null" / "set default"; None for the default (no action).
+    on_delete: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct Relations {
+    schema: String,
+    table: String,
+    /// Tables the queried table references.
+    parents: Vec<Relation>,
+    /// Tables referencing the queried table.
+    children: Vec<Relation>,
+    /// Per result column, the queried table's column it reads directly, or null (computed,
+    /// or the query couldn't be described). Lets the UI read FK values from a selected row.
+    result_columns: Vec<Option<String>>,
+}
+
+/// FK relations of the single table `sql` reads (a self-join counts as one table). Two round
+/// trips: describe + EXPLAIN pipelined (neither executes), then one batched catalog query.
+/// Per-partition clones of FKs (conparentid <> 0) are skipped so each FK shows once.
+async fn relations_of(state: &AppState, connection: &str, database: &str, sql: &str) -> Result<Relations, String> {
     let client = client(state, connection, database).await?;
-    let plan = simple_query(&client, &format!("EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) {sql}")).await?;
-    let json: String = plan.into_iter().flat_map(|s| s.rows).filter_map(|mut r| r.remove(0)).collect();
+    let explain = format!("EXPLAIN (VERBOSE, COSTS OFF, FORMAT JSON) {sql}");
+    let (stmt, plan) = tokio::join!(client.prepare(sql), simple_query(&client, &explain));
+    let json: String = plan?.into_iter().flat_map(|s| s.rows).filter_map(|mut r| r.remove(0)).collect();
     let mut rels = Vec::new();
     plan_relations(&serde_json::from_str(&json).map_err(|e| e.to_string())?, &mut rels);
+    rels.sort();
     rels.dedup();
-    let mut distinct = rels.clone();
-    distinct.sort();
-    distinct.dedup();
-    let (schema, table) = match distinct.as_slice() {
-        [] => return Ok("No tables referenced.".into()),
+    let (schema, table) = match rels.as_slice() {
+        [] => return Err("No tables referenced.".into()),
         [one] => one.clone(),
         _ => return Err("Relations are only shown for queries reading a single table.".into()),
     };
@@ -572,57 +599,67 @@ async fn relations_text(state: &AppState, connection: &str, database: &str, sql:
                JOIN pg_attribute a ON a.attrelid = c.{rel} AND a.attnum = k.n)"
         )
     };
+    let fks = |this_rel: &str, other_rel: &str| {
+        let (this_key, other_key) = if this_rel == "conrelid" { ("conkey", "confkey") } else { ("confkey", "conkey") };
+        format!(
+            "SELECT c.conname, n.nspname, t.relname, {}, {}, c.confdeltype \
+               FROM pg_constraint c JOIN pg_class t ON t.oid = c.{other_rel} JOIN pg_namespace n ON n.oid = t.relnamespace \
+              WHERE c.contype = 'f' AND c.conparentid = 0 AND c.{this_rel} = {reg} ORDER BY 2, 3, 1",
+            cols(this_rel, this_key),
+            cols(other_rel, other_key),
+        )
+    };
     let sets = simple_query(
         &client,
         &format!(
-            "SELECT c.conname, n.nspname, t.relname, {}, {}, c.confdeltype \
-               FROM pg_constraint c JOIN pg_class t ON t.oid = c.confrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
-              WHERE c.contype = 'f' AND c.conparentid = 0 AND c.conrelid = {reg} ORDER BY 2, 3, 1; \
-             SELECT c.conname, n.nspname, t.relname, {}, {}, c.confdeltype \
-               FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace \
-              WHERE c.contype = 'f' AND c.conparentid = 0 AND c.confrelid = {reg} ORDER BY 2, 3, 1",
-            cols("conrelid", "conkey"),
-            cols("confrelid", "confkey"),
-            cols("conrelid", "conkey"),
-            cols("confrelid", "confkey"),
+            "{}; {}; SELECT attrelid, attnum, attname FROM pg_attribute WHERE attrelid = {reg} AND attnum > 0 AND NOT attisdropped",
+            fks("conrelid", "confrelid"),
+            fks("confrelid", "conrelid"),
         ),
     )
     .await?;
-    let [parents, children]: [Vec<Vec<Option<String>>>; 2] =
+    let [parents, children, attrs]: [Vec<Vec<Option<String>>>; 3] =
         sets.into_iter().map(|s| s.rows).collect::<Vec<_>>().try_into().map_err(|_| "unexpected catalog result")?;
     let v = |r: &Vec<Option<String>>, i: usize| r[i].clone().unwrap_or_default();
-    let list = |r: &Vec<Option<String>>, i: usize| -> String {
-        serde_json::from_str::<Vec<String>>(r[i].as_deref().unwrap_or("[]")).unwrap_or_default().join(", ")
+    let list = |r: &Vec<Option<String>>, i: usize| -> Vec<String> {
+        serde_json::from_str(r[i].as_deref().unwrap_or("[]")).unwrap_or_default()
     };
-    // confdeltype: a = no action (default), r = restrict, c = cascade, n = set null, d = set default.
-    let on_delete = |r: &Vec<Option<String>>| match v(r, 5).as_str() {
-        "r" => ", on delete restrict",
-        "c" => ", on delete cascade",
-        "n" => ", on delete set null",
-        "d" => ", on delete set default",
-        _ => "",
+    let relation = |r: &Vec<Option<String>>| Relation {
+        constraint: v(r, 0),
+        schema: v(r, 1),
+        table: v(r, 2),
+        cols: list(r, 3),
+        other_cols: list(r, 4),
+        // confdeltype: a = no action (default), r = restrict, c = cascade, n = set null, d = set default.
+        on_delete: match v(r, 5).as_str() {
+            "r" => Some("restrict"),
+            "c" => Some("cascade"),
+            "n" => Some("set null"),
+            "d" => Some("set default"),
+            _ => None,
+        }
+        .map(str::to_string),
     };
-
-    // public tables by bare name; other schemas keep their prefix so same-named tables stay distinct.
-    let name = |r: &Vec<Option<String>>| match v(r, 1).as_str() {
-        "public" => v(r, 2),
-        s => format!("{s}.{}", v(r, 2)),
+    // Map result columns onto the table via describe (table oid + attnum); empty if describe failed.
+    let oid: Option<u32> = attrs.first().and_then(|r| v(r, 0).parse().ok());
+    let result_columns = match stmt {
+        Ok(stmt) => stmt
+            .columns()
+            .iter()
+            .map(|c| {
+                (c.table_oid()? == oid?)
+                    .then(|| attrs.iter().find(|a| v(a, 1).parse::<i16>().ok() == c.column_id()).map(|a| v(a, 2)))?
+            })
+            .collect(),
+        Err(_) => Vec::new(),
     };
-    let mut out = format!("{schema}.{table}\n\nparents:\n");
-    if parents.is_empty() {
-        out.push_str("  (none)\n");
-    }
-    for r in &parents {
-        out.push_str(&format!("  {} → {}[{}]   [{}{}]\n", list(r, 3), name(r), list(r, 4), v(r, 0), on_delete(r)));
-    }
-    out.push_str("\nchildren:\n");
-    if children.is_empty() {
-        out.push_str("  (none)\n");
-    }
-    for r in &children {
-        out.push_str(&format!("  {}[{}] → {}   [{}{}]\n", name(r), list(r, 3), list(r, 4), v(r, 0), on_delete(r)));
-    }
-    Ok(out)
+    Ok(Relations {
+        schema,
+        table,
+        parents: parents.iter().map(relation).collect(),
+        children: children.iter().map(relation).collect(),
+        result_columns,
+    })
 }
 
 #[tauri::command]
@@ -631,8 +668,8 @@ async fn table_relations(
     connection: String,
     database: String,
     sql: String,
-) -> Result<String, String> {
-    relations_text(&state, &connection, &database, &sql).await
+) -> Result<Relations, String> {
+    relations_of(&state, &connection, &database, &sql).await
 }
 
 #[tauri::command]
@@ -744,36 +781,37 @@ mod tests {
         let info = tables_info_text(&state, "t", "postgres", "UPDATE dbv_parent SET label = 'x' WHERE pid = 1").await.unwrap();
 
         // Relations: single-table queries only (a self-join is one table); both directions.
-        let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent WHERE pid > 0 ORDER BY pid LIMIT 5").await.unwrap();
-        assert!(r.starts_with("public.dbv_parent"), "{r}");
-        assert!(r.contains("children:\n  dbv_child[parent_id] → pid   [dbv_child_parent_id_fkey]"), "{r}");
-        assert!(r.contains("parents:\n  (none)"), "{r}");
-        let r = relations_text(&state, "t", "postgres", "SELECT a.* FROM dbv_child a JOIN dbv_child b ON a.id = b.id").await.unwrap();
-        assert!(r.contains("parent_id → dbv_parent[pid]   [dbv_child_parent_id_fkey]"), "{r}");
-        assert!(relations_text(&state, "t", "postgres", "SELECT * FROM dbv_child c JOIN dbv_parent p ON p.pid = c.parent_id").await.is_err());
-        assert_eq!(relations_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
-        // ON DELETE actions are shown; a partitioned child's FK appears once, not once per partition.
+        let r = relations_of(&state, "t", "postgres", "SELECT * FROM dbv_parent WHERE pid > 0 ORDER BY pid LIMIT 5").await.unwrap();
+        assert_eq!((r.schema.as_str(), r.table.as_str()), ("public", "dbv_parent"));
+        assert!(r.parents.is_empty());
+        let kid = r.children.iter().find(|k| k.table == "dbv_child").unwrap();
+        assert_eq!((kid.cols.clone(), kid.other_cols.clone()), (vec!["pid".to_string()], vec!["parent_id".to_string()]));
+        assert_eq!(r.result_columns, vec![Some("pid".to_string()), Some("label".to_string())]);
+        let r = relations_of(&state, "t", "postgres", "SELECT a.parent_id AS p, a.id + 1 FROM dbv_child a JOIN dbv_child b ON a.id = b.id").await.unwrap();
+        let up = &r.parents[0];
+        assert_eq!((up.table.as_str(), up.cols.clone(), up.other_cols.clone()), ("dbv_parent", vec!["parent_id".to_string()], vec!["pid".to_string()]));
+        assert_eq!(r.result_columns, vec![Some("parent_id".to_string()), None], "aliases map back; computed is null");
+        assert!(relations_of(&state, "t", "postgres", "SELECT * FROM dbv_child c JOIN dbv_parent p ON p.pid = c.parent_id").await.is_err());
+        assert_eq!(relations_of(&state, "t", "postgres", "SELECT 1").await.unwrap_err(), "No tables referenced.");
+        // ON DELETE actions; a partitioned child's FK appears once (not per partition); other schemas.
         simple_query(
             &c,
             "DROP TABLE IF EXISTS dbv_grand, dbv_part; \
              CREATE TABLE dbv_grand (id int, p int REFERENCES dbv_parent (pid) ON DELETE CASCADE); \
              CREATE TABLE dbv_part (id int, p int REFERENCES dbv_parent (pid)) PARTITION BY RANGE (id); \
              CREATE TABLE dbv_part_1 PARTITION OF dbv_part FOR VALUES FROM (0) TO (10); \
-             CREATE TABLE dbv_part_2 PARTITION OF dbv_part FOR VALUES FROM (10) TO (20)",
+             CREATE TABLE dbv_part_2 PARTITION OF dbv_part FOR VALUES FROM (10) TO (20); \
+             CREATE SCHEMA IF NOT EXISTS dbv_s; DROP TABLE IF EXISTS dbv_s.kid; \
+             CREATE TABLE dbv_s.kid (id int, p int REFERENCES dbv_parent (pid))",
         )
         .await
         .unwrap();
-        let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent").await.unwrap();
-        assert!(r.contains("dbv_grand[p] → pid   [dbv_grand_p_fkey, on delete cascade]"), "{r}");
-        assert!(r.contains("dbv_part[p] → pid"), "{r}");
-        // Non-public schemas keep their prefix.
-        simple_query(&c, "CREATE SCHEMA IF NOT EXISTS dbv_s; DROP TABLE IF EXISTS dbv_s.kid; \
-                          CREATE TABLE dbv_s.kid (id int, p int REFERENCES dbv_parent (pid))")
-            .await
-            .unwrap();
-        let r = relations_text(&state, "t", "postgres", "SELECT * FROM dbv_parent").await.unwrap();
-        assert!(r.contains("dbv_s.kid[p] → pid   [kid_p_fkey]"), "{r}");
-        assert!(!r.contains("dbv_part_1") && !r.contains("dbv_part_2"), "{r}");        assert!(info.starts_with("public.dbv_parent"), "{info}");
+        let r = relations_of(&state, "t", "postgres", "SELECT * FROM dbv_parent").await.unwrap();
+        let names: Vec<_> = r.children.iter().map(|k| format!("{}.{}", k.schema, k.table)).collect();
+        assert_eq!(names, ["dbv_s.kid", "public.dbv_child", "public.dbv_grand", "public.dbv_part"]);
+        assert_eq!(r.children[2].on_delete.as_deref(), Some("cascade"));
+        assert_eq!(r.children[1].on_delete, None);
+        assert!(info.starts_with("public.dbv_parent"), "{info}");
         assert_eq!(tables_info_text(&state, "t", "postgres", "SELECT 1").await.unwrap(), "No tables referenced.");
         assert!(tables_info_text(&state, "t", "postgres", "SELECT 1; SELECT 2").await.is_err());
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deleteSql, editRowSql, insertSql, pickKey, placeholder, updateSql, type ColumnMeta, type TableMeta } from "./rowSql.ts";
+import { deleteSql, editRowSql, insertSql, pickKey, placeholder, relatedQuery, relationBlocked, updateSql, type ColumnMeta, type TableMeta } from "./rowSql.ts";
 
 const col = (name: string, o: Partial<ColumnMeta> = {}): ColumnMeta => ({
   name,
@@ -119,4 +119,21 @@ test("result columns may be aliased (mapped to real names) or computed (null)", 
   assert.deepEqual(pickKey({ columns: [], keys: [["id"]] }, mapped, r), ["id"]);
   assert.equal(updateSql(t, ["id"], mapped, r, 1).sql, `UPDATE "public"."users" SET "email" = 'x@y' WHERE "id" = '5';`);
   assert.equal(pickKey({ columns: [], keys: [["id"]] }, [null, "email"], ["5", "x"]), null, "key column computed -> unusable");
+});
+
+test("relatedQuery follows an FK from the selected row in either direction", () => {
+  // accounts.userId -> users.id (parent); account_meeting_rooms.origin_account_id -> accounts.accountId (child)
+  const parent = { constraint: "f1", schema: "public", table: "users", cols: ["userId"], otherCols: ["id"], onDelete: null };
+  const child = { constraint: "f2", schema: "app", table: "rooms", cols: ["accountId"], otherCols: ["origin_account_id"], onDelete: null };
+  const cols = ["accountId", "userId", null]; // e.g. SELECT "accountId", "userId", now()
+  assert.deepEqual(relatedQuery(parent, cols, ["a1", "u'7", "x"]), { sql: `SELECT * FROM "public"."users" WHERE "id" = 'u''7' LIMIT 420` });
+  assert.deepEqual(relatedQuery(child, cols, ["a1", "u7", "x"]), { sql: `SELECT * FROM "app"."rooms" WHERE "origin_account_id" = 'a1' LIMIT 420` });
+  assert.deepEqual(relatedQuery(parent, cols, ["a1", null, "x"]), { error: "The selected row has NULL userId, so nothing is linked" });
+});
+
+test("composite FKs AND their columns; missing columns block the relation", () => {
+  const rel = { constraint: "f", schema: "public", table: "t", cols: ["a", "b"], otherCols: ["x", "y"], onDelete: null };
+  assert.deepEqual(relatedQuery(rel, ["b", "a"], ["2", "1"]), { sql: `SELECT * FROM "public"."t" WHERE "x" = '1' AND "y" = '2' LIMIT 420` });
+  assert.equal(relationBlocked(rel, ["a"]), "The results don't include b");
+  assert.equal(relationBlocked(rel, ["a", "b"]), null);
 });

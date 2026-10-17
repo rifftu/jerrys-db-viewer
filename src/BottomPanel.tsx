@@ -3,6 +3,8 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { Connection, ResultSet, Selection } from "./types";
 import type { Review } from "./ReviewDialog";
+import { RelationsView } from "./RelationsView";
+import type { Relations } from "./rowSql.ts";
 import { deleteSql, editRowSql, insertSql, pickKey, updateSql, type EditContext } from "./rowSql.ts";
 
 type Props = {
@@ -13,6 +15,8 @@ type Props = {
   lastSql: string | null;
   connection: Connection | undefined;
   onReview: (review: Review) => void;
+  /** Open a new tab on this tab's connection/database (relations follow-through). */
+  onOpenTab: (on: Selection, table: string, sql: string) => void;
   /** The last run's rows are on screen (single result set). Row shortcuts only look at the query then. */
   rowsShown: boolean;
   /** The tab's selected cell (read on click; selecting doesn't re-render this panel). */
@@ -43,23 +47,29 @@ function startResize(e: ReactPointerEvent<HTMLDivElement>) {
 }
 
 /**
- * Text from a backend command about the tab's last query (Info, Relations). Fetched only while
- * visible; cached until the tab runs a different query. Errors are shown as the text.
+ * A backend command's answer about the tab's last query (Info, Relations). Fetched only while
+ * visible; cached until the tab runs a different query. Null while loading.
  */
-function useQueryDump(command: string, visible: boolean, target: Selection | null, lastSql: string | null): string | null {
-  const [dump, setDump] = useState<{ key: string; text: string } | null>(null);
+function useQueryResult<T>(
+  command: string,
+  visible: boolean,
+  target: Selection | null,
+  lastSql: string | null,
+): { value: T } | { error: string } | null {
+  const [res, setRes] = useState<{ key: string; value?: T; error?: string } | null>(null);
   const key = target && lastSql ? `${target.conn}\u0000${target.db}\u0000${lastSql}` : null;
   useEffect(() => {
-    if (!visible || !key || !target || !lastSql || dump?.key === key) return;
+    if (!visible || !key || !target || !lastSql || res?.key === key) return;
     let stale = false;
-    invoke<string>(command, { connection: target.conn, database: target.db, sql: lastSql })
-      .then((text) => !stale && setDump({ key, text }))
-      .catch((e) => !stale && setDump({ key, text: String(e) }));
+    invoke<T>(command, { connection: target.conn, database: target.db, sql: lastSql })
+      .then((value) => !stale && setRes({ key, value }))
+      .catch((e) => !stale && setRes({ key, error: String(e) }));
     return () => {
       stale = true;
     };
   }, [visible, key]);
-  return dump?.key === key ? dump.text : null;
+  if (res?.key !== key) return null;
+  return "error" in res && res.error !== undefined ? { error: res.error } : { value: res.value as T };
 }
 
 type PanelTab = "info" | "relations" | "edit";
@@ -77,6 +87,7 @@ export const BottomPanel = memo(function BottomPanel({
   onReview,
   rowsShown,
   getSelection,
+  onOpenTab,
 }: Props) {
   const [panel, setPanel] = useState<PanelTab>("relations");
   const [collapsed, setCollapsed] = useState(false);
@@ -152,8 +163,8 @@ export const BottomPanel = memo(function BottomPanel({
   }
 
   const shown = (p: PanelTab) => active && !collapsed && panel === p;
-  const info = useQueryDump("tables_info", shown("info"), target, lastSql);
-  const relations = useQueryDump("table_relations", shown("relations"), target, lastSql);
+  const info = useQueryResult<string>("tables_info", shown("info"), target, lastSql);
+  const relations = useQueryResult<Relations>("table_relations", shown("relations"), target, lastSql);
 
   function review() {
     if (!target || !editSql.trim()) return;
@@ -190,11 +201,20 @@ export const BottomPanel = memo(function BottomPanel({
           </button>
         ))}
       </div>
-      {!collapsed && (panel === "info" || panel === "relations") && (
+      {!collapsed && panel === "info" && (
         <pre className="bottom-body info-dump">
-          {!lastSql ? "Run a query to see its tables." : ((panel === "info" ? info : relations) ?? "Loading…")}
+          {!lastSql ? "Run a query to see its tables." : !info ? "Loading…" : "error" in info ? info.error : info.value}
         </pre>
       )}
+      {!collapsed &&
+        panel === "relations" &&
+        (relations && "value" in relations && target ? (
+          <RelationsView rels={relations.value} getSelection={getSelection} onOpen={(table, sql) => onOpenTab(target, table, sql)} />
+        ) : (
+          <pre className="bottom-body info-dump">
+            {!lastSql ? "Run a query to see its tables." : !relations ? "Loading…" : "error" in relations ? relations.error : ""}
+          </pre>
+        ))}
       {!collapsed && panel === "edit" && (
         <div className="bottom-body edit">
           <div className="edit-header">

@@ -311,3 +311,11 @@ td[data-sel] { background: color-mix(in srgb, Highlight 45%, transparent); }
 .review-dialog { height: fit-content; max-height: min(70vh, 700px); }
 
 .review-dialog .cell-dialog-body { flex: none; max-height: calc(min(70vh, 700px) - 40px); }
+
+/* Relations: arrows are greyed until the tab has a selected cell (data-has-sel on its pane);
+   then normal color + underline, not link-blue. Blocked relations stay grey. */
+.relations .rel-arrow { opacity: 0.35; cursor: default; }
+
+.pane[data-has-sel] .relations .rel-arrow.ok { opacity: 1; text-decoration: underline; cursor: pointer; }
+
+.relations .rel-note { margin-top: 8px; color: var(--error); }
