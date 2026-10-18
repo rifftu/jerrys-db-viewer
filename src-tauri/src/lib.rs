@@ -2,6 +2,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use postgres_native_tls::MakeTlsConnector;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, SimpleQueryMessage};
 
@@ -870,9 +871,23 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    // Dev builds get their own app identifier, so `tauri dev` and an installed release build
+    // aren't the same app to the single-instance check (or anything else keyed on it).
+    if cfg!(debug_assertions) {
+        context.config_mut().identifier.push_str(".dev");
+    }
     tauri::Builder::default()
+        // Must be the first plugin: a second launch exits and the running instance comes forward.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, table_relations, edit_context, run_query])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }

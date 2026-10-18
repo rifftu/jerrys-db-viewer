@@ -26,6 +26,10 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
 - Type SQL, press **Enter** to run it (**Shift+Enter** for a newline).
 - Results are a plain, non-interactive table. All values are shown as text (simple query protocol).
 
+Only one instance runs at a time: launching it again brings the running window forward
+(`tauri-plugin-single-instance`). Dev builds use the app id with a `.dev` suffix, so `npm run tauri dev`
+still runs alongside an installed release build.
+
 ## Connections
 
 Connections are config-as-code in a TOML file, see [`connections.example.toml`](connections.example.toml).
