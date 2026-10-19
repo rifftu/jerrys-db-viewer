@@ -50,4 +50,10 @@ Needs Node and Rust (`mise install` picks up Rust from `mise.toml`).
 npm install
 npm run tauri dev      # run the app
 npm run tauri build    # build DB Viewer.app
+npm run release        # release build with the version stamped on the app icon
 ```
+
+`npm run release` reads the version from `src-tauri/tauri.conf.json`, stamps it on the 1024px icon from
+`src-tauri/icons/icon.icns` (`scripts/watermark-icon.swift`, macOS only, no dependencies), generates the icon
+set into `src-tauri/target/release-icon/` and builds with it. The committed icons are never modified. Bump the
+version in `tauri.conf.json` before releasing.
