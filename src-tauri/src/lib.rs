@@ -886,6 +886,7 @@ pub fn run() {
                 let _ = w.set_focus();
             }
         }))
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::default())
         .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, table_relations, edit_context, run_query])
         .run(context)

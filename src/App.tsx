@@ -1,5 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { Menu } from "@tauri-apps/api/menu";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { cellText, detailsJson, shouldCopyCell } from "./cellCopy";
 import { invoke } from "@tauri-apps/api/core";
 import { tabLabels } from "./tabLabels";
 import { ResultTable } from "./ResultTable";
@@ -28,6 +31,9 @@ type Tab = {
   elapsed: number | null;
   /** Run that produced `results`. */
   resultsRun: number;
+  /** SQL and start time of the run whose `results` are shown (lastSql/lastRunAt move on at the next run's start). */
+  resultsSql: string | null;
+  resultsAt: number | null;
   /** FK target per result column, from the run it describes; arrives independently of results. */
   fks: { run: number; cols: (FkTarget | null)[] } | null;
 };
@@ -47,6 +53,8 @@ const makeTab = (target: Selection | null, table?: string, sql = ""): Tab => ({
   busy: false,
   elapsed: null,
   resultsRun: 0,
+  resultsSql: null,
+  resultsAt: null,
   fks: null,
 });
 
@@ -118,7 +126,8 @@ export default function App() {
       if (!on || !query.trim()) return;
       const id = (runIds.current.get(tabId) ?? 0) + 1;
       runIds.current.set(tabId, id);
-      updateTab(tabId, { busy: true, error: "", lastRunAt: Date.now(), lastSql: query });
+      const startedAt = Date.now();
+      updateTab(tabId, { busy: true, error: "", lastRunAt: startedAt, lastSql: query });
       // Fired alongside the query (not awaited): the backend pipelines both on one
       // connection, and results render without waiting for FK info.
       invoke<(FkTarget | null)[] | null>("describe_columns", { connection: on.conn, database: on.db, sql: query })
@@ -136,6 +145,8 @@ export default function App() {
       updateTab(tabId, {
         results: res,
         resultsRun: id,
+        resultsSql: query,
+        resultsAt: startedAt,
         error: err,
         elapsed: Math.round(performance.now() - start),
         busy: false,
@@ -329,13 +340,13 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
   const sqlRef = useRef<HTMLTextAreaElement>(null);
   // Selected cell of the shown results, kept in a ref (selecting re-renders nothing) and tagged with
   // the run it came from so a re-query invalidates it. Read by the edit panel's row shortcuts.
-  const selection = useRef<{ run: number; values: (string | null)[]; col: number } | null>(null);
+  const selection = useRef<{ run: number; values: (string | null)[]; col: number; columns: string[] } | null>(null);
   const resultsRun = useRef(tab.resultsRun);
   resultsRun.current = tab.resultsRun;
   // data-has-sel on the pane lets CSS un-grey selection-dependent controls (relation arrows)
   // without re-rendering; cleared when a new run replaces the results.
   const paneRef = useRef<HTMLDivElement>(null);
-  const onSelect = useCallback((s: { values: (string | null)[]; col: number }) => {
+  const onSelect = useCallback((s: { values: (string | null)[]; col: number; columns: string[] }) => {
     selection.current = { run: resultsRun.current, ...s };
     if (paneRef.current) paneRef.current.dataset.hasSel = "";
   }, []);
@@ -346,6 +357,54 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
     const s = selection.current;
     return s && s.run === resultsRun.current ? s : null;
   }, []);
+
+  // Copy cell / copy details. Read the latest tab through a ref so the callbacks stay stable.
+  const tabRef = useRef(tab);
+  tabRef.current = tab;
+  const copyCell = useCallback(() => {
+    const s = getSelection();
+    if (s) writeText(cellText(s.values[s.col])).catch(() => {});
+  }, [getSelection]);
+  const copyDetails = useCallback(() => {
+    const s = getSelection();
+    const t = tabRef.current;
+    if (!s || !t.target || t.resultsSql === null || t.resultsAt === null) return;
+    const json = detailsJson({
+      columns: s.columns,
+      row: s.values,
+      col: s.col,
+      sql: t.resultsSql,
+      ranAt: t.resultsAt,
+      connection: t.target.conn,
+      database: t.target.db,
+    });
+    writeText(json).catch(() => {});
+  }, [getSelection]);
+  // Native context menu (clipboard goes through the plugin: a menu click isn't a page user gesture).
+  const onCellMenu = useCallback(() => {
+    Menu.new({
+      items: [
+        { id: "copy-cell", text: "Copy cell", accelerator: "CmdOrCtrl+C", action: copyCell },
+        { id: "copy-details", text: "Copy details", accelerator: "CmdOrCtrl+Shift+C", action: copyDetails },
+      ],
+    })
+      .then((menu) => menu.popup())
+      .catch(() => {});
+  }, [copyCell, copyDetails]);
+  // ⌘C / ⌘⇧C on the selected cell, only for the visible tab, and never instead of a normal copy
+  // (text selected, typing in a field, or a dialog open).
+  useEffect(() => {
+    if (!active) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey || e.key.toLowerCase() !== "c") return;
+      if (!getSelection() || !shouldCopyCell(document)) return;
+      e.preventDefault();
+      if (e.shiftKey) copyDetails();
+      else copyCell();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [active, getSelection, copyCell, copyDetails]);
   // The last run's rows are on screen (one result set with columns). The edit panel only asks
   // the backend about the query after this, so it never delays showing the table.
   const rowsShown = !busy && !error && tab.resultsRun > 0 && results.length === 1 && results[0].columns.length > 0;
@@ -390,7 +449,7 @@ const TabPane = memo(function TabPane({ tab, active, onSqlChange, onRun, onOpenF
         {results.map((r, i) =>
           r.columns.length ? (
             // Keyed by run so a re-query starts with fresh (auto) column widths.
-            <ResultTable key={`${tab.resultsRun}-${i}`} result={r} fks={colFks} target={target} onOpenFk={onOpenFk} onInspect={onInspect} onInsert={insertSql} onSelect={onSelect} />
+            <ResultTable key={`${tab.resultsRun}-${i}`} result={r} fks={colFks} target={target} onOpenFk={onOpenFk} onInspect={onInspect} onInsert={insertSql} onSelect={onSelect} onCellMenu={onCellMenu} />
           ) : (
             <div key={i} className="affected">
               {r.affected} row(s) affected

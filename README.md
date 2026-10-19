@@ -18,6 +18,8 @@ A deliberately tiny Postgres viewer: Tauri 2 + React + tokio-postgres.
     shortcuts generate SQL for the
     selected cell: **delete row** / **edit value** / **edit row** (by primary key or unique index; edit row prefills
     every editable column) and **add row** (defaults/NULLs). Generated rows annotate each value with its column and type.
+- With a cell selected, ⌘C copies its value and ⌘⇧C copies JSON details (field, row, query, query time,
+  connection, database); both are also in the cell's right-click menu. ⌘C still copies selected text normally.
 - Click a cell to select it (its row and column get a lighter tint; colors follow the system selection color).
 - With the SQL box focused, ⌥-click a header to insert `"column"`, or a cell to insert `'value'` (or `NULL`), at the cursor.
 - Press and hold a cell for 500ms to open its full value in a dialog (copy / close).

@@ -13,7 +13,9 @@ type Props = {
   /** Option-click: insert text at the SQL cursor; false if the SQL box isn't focused. */
   onInsert: (text: string) => boolean;
   /** A cell was selected: its row's values and column index (for selection-aware features). */
-  onSelect: (sel: { values: (string | null)[]; col: number }) => void;
+  onSelect: (sel: { values: (string | null)[]; col: number; columns: string[] }) => void;
+  /** Right-click on a cell (already selected by then): show the cell's context menu. */
+  onCellMenu: () => void;
 };
 
 /** A data cell resolved from a DOM event target. */
@@ -39,7 +41,7 @@ function charsWidth(el: HTMLElement, n: number): number {
  * width as its default and switches the table to fixed layout. Widths are local state, so a
  * re-query (which remounts this component) starts from auto again.
  */
-export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert, onSelect }: Props) {
+export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert, onSelect, onCellMenu }: Props) {
   const tableRef = useRef<HTMLTableElement>(null);
   const press = useRef<{ timer: number; x: number; y: number } | null>(null);
 
@@ -73,7 +75,7 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert
     const marked = [cell.td, cell.td.parentElement as HTMLElement, ...(col ? [col] : [])];
     for (const el of marked) el.dataset.sel = "";
     selected.current = { cell, marked };
-    onSelect({ values: result.rows[cell.row], col: cell.col });
+    onSelect({ values: result.rows[cell.row], col: cell.col, columns: result.columns });
   }
 
   /** Column index of the header under an event target. */
@@ -90,6 +92,15 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert
     const cell = col === null ? cellAt(e.target) : null;
     const text = col !== null ? quoteIdent(result.columns[col]) : cell ? sqlValue(cell.value) : null;
     if (text !== null && onInsert(text)) e.preventDefault();
+  }
+
+  // Right-click selects the cell, then opens its context menu.
+  function onContextMenu(e: ReactMouseEvent<HTMLTableElement>) {
+    const cell = cellAt(e.target);
+    if (!cell) return;
+    e.preventDefault();
+    select(cell);
+    onCellMenu();
   }
 
   function onClick(e: ReactMouseEvent<HTMLTableElement>) {
@@ -197,6 +208,7 @@ export function ResultTable({ result, fks, target, onOpenFk, onInspect, onInsert
       ref={tableRef}
       onMouseDown={onMouseDown}
       onClick={onClick}
+      onContextMenu={onContextMenu}
       onPointerDown={startPress}
       onPointerMove={movePress}
       onPointerUp={cancelPress}
