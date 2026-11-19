@@ -1,8 +1,10 @@
 import { useState } from "react";
-import { relatedQuery, relationBlocked, type Relation, type Relations } from "./rowSql.ts";
+import { joinQuery, relatedQuery,relationBlocked, type Relation, type Relations } from "./rowSql.ts";
 
 type Props = {
   rels: Relations;
+  /** The query `rels` describes; ⋈ joins onto its rows. */
+  sql: string;
   /** The tab's selected cell, read on click (selecting doesn't re-render this view). */
   getSelection: () => { values: (string | null)[]; col: number } | null;
   /** Open a new tab (on the owning tab's connection/database) titled `table` running `sql`. */
@@ -17,8 +19,9 @@ const details = (r: Relation) => `[${r.constraint}${r.onDelete ? `, on delete ${
  * Parents (→) and children (←) of the queried table. Arrows are greyed until a cell is selected:
  * CSS keys off data-has-sel on the tab's pane (set without re-rendering), so selecting a cell
  * re-renders nothing here. Clicking follows the FK from the selected row into a new tab.
+ * ⋈ needs no selection: it opens the whole result set LEFT JOINed to the related table.
  */
-export function RelationsView({ rels, getSelection, onOpen }: Props) {
+export function RelationsView({ rels, sql, getSelection, onOpen }: Props) {
   const [note, setNote] = useState("");
 
   function follow(rel: Relation) {
@@ -28,6 +31,13 @@ export function RelationsView({ rels, getSelection, onOpen }: Props) {
     if ("error" in q) return setNote(q.error);
     setNote("");
     onOpen(rel.table, q.sql);
+  }
+
+  function join(rel: Relation) {
+    const q = joinQuery(rel, rels.resultColumns, rels.resultNames, sql);
+    if ("error" in q) return setNote(q.error);
+    setNote("");
+    onOpen(rels.table, q.sql);
   }
 
   const line = (rel: Relation, arrow: string, text: string) => {
@@ -41,6 +51,13 @@ export function RelationsView({ rels, getSelection, onOpen }: Props) {
           onClick={() => !blocked && follow(rel)}
         >
           {arrow}
+        </span>{" "}
+        <span
+          className={blocked ? "rel-join" : "rel-join ok"}
+          title={blocked ?? `Open these results LEFT JOINed to ${nameOf(rel)} (no selection needed)`}
+          onClick={() => !blocked && join(rel)}
+        >
+          ⋈
         </span>
         {` ${text}   ${details(rel)}`}
       </div>

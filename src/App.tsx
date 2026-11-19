@@ -11,7 +11,7 @@ import type { Connection, FkTarget, ResultSet, Selection, Table } from "./types"
 import { TableList } from "./TableList";
 import { BottomPanel } from "./BottomPanel";
 import { ReviewDialog, type Review, type ReviewDialogHandle } from "./ReviewDialog";
-import { DEFAULT_LIMIT, quoteIdent, quoteLiteral } from "./sql";
+import { DEFAULT_LIMIT, quoteIdent, quoteLiteral, titleFromSql } from "./sql";
 
 type Tab = {
   id: number;
@@ -81,18 +81,36 @@ export default function App() {
     setTabs((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   }, []);
 
+  // Bumped by the reconnect button to re-fetch the sidebar's databases and tables.
+  const [epoch, setEpoch] = useState(0);
+
+  const loadConnections = useCallback(
+    () =>
+      invoke<Connection[]>("list_connections")
+        .then((list) => {
+          setConnections(list);
+          if (list.length) {
+            const first = { conn: list[0].name, db: list[0].dbname };
+            // Keep the current selection unless its connection is gone from the config.
+            setSel((cur) => (cur && list.some((c) => c.name === cur.conn) ? cur : first));
+            setTabs((ts) => ts.map((t) => (t.target ? t : { ...t, target: first })));
+          }
+        })
+        .catch((e) => setSidebarError(String(e))),
+    [],
+  );
   useEffect(() => {
-    invoke<Connection[]>("list_connections")
-      .then((list) => {
-        setConnections(list);
-        if (list.length) {
-          const first = { conn: list[0].name, db: list[0].dbname };
-          setSel(first);
-          setTabs((ts) => ts.map((t) => (t.target ? t : { ...t, target: first })));
-        }
-      })
-      .catch((e) => setSidebarError(String(e)));
-  }, []);
+    loadConnections();
+  }, [loadConnections]);
+
+  // Drops every backend connection (queries stuck on a dead one fail right away), re-reads the
+  // config and reloads the sidebar. Tabs keep their SQL and results; their next run reconnects.
+  const reconnect = useCallback(() => {
+    invoke("reset_connections")
+      .catch(() => {})
+      .then(loadConnections)
+      .then(() => setEpoch((n) => n + 1));
+  }, [loadConnections]);
 
   // The database list is server-wide, so it only depends on the connection.
   const defaultDb = connections.find((c) => c.name === sel?.conn)?.dbname;
@@ -106,7 +124,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [sel?.conn, defaultDb]);
+  }, [sel?.conn, defaultDb, epoch]);
 
   useEffect(() => {
     if (!sel) return;
@@ -119,7 +137,7 @@ export default function App() {
     return () => {
       stale = true;
     };
-  }, [sel?.conn, sel?.db]);
+  }, [sel?.conn, sel?.db, epoch]);
 
   const run = useCallback(
     async (tabId: number, on: Selection | null, query: string) => {
@@ -127,7 +145,8 @@ export default function App() {
       const id = (runIds.current.get(tabId) ?? 0) + 1;
       runIds.current.set(tabId, id);
       const startedAt = Date.now();
-      updateTab(tabId, { busy: true, error: "", lastRunAt: startedAt, lastSql: query });
+      // The title follows whatever runs, so hand-typed SQL renames the tab too.
+      updateTab(tabId, { busy: true, error: "", lastRunAt: startedAt, lastSql: query, ...titleFromSql(query) });
       // Fired alongside the query (not awaited): the backend pipelines both on one
       // connection, and results render without waiting for FK info.
       invoke<(FkTarget | null)[] | null>("describe_columns", { connection: on.conn, database: on.db, sql: query })
@@ -253,20 +272,25 @@ export default function App() {
   return (
     <div className="app" ref={appRef}>
       <aside className="sidebar">
-        <select
-          value={sel?.conn ?? ""}
-          onChange={(e) => {
-            const c = connections.find((c) => c.name === e.target.value);
-            if (c) setSel({ conn: c.name, db: c.dbname });
-          }}
-        >
-          {connections.length === 0 && <option value="">No connections</option>}
-          {connections.map((c) => (
-            <option key={c.name} value={c.name}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+        <div className="conn-row">
+          <select
+            value={sel?.conn ?? ""}
+            onChange={(e) => {
+              const c = connections.find((c) => c.name === e.target.value);
+              if (c) setSel({ conn: c.name, db: c.dbname });
+            }}
+          >
+            {connections.length === 0 && <option value="">No connections</option>}
+            {connections.map((c) => (
+              <option key={c.name} value={c.name}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <button title="Reconnect: drop all database connections and reload (use after a network change)" onClick={reconnect}>
+            ⟳
+          </button>
+        </div>
         {sel && (
           <select value={sel.db} onChange={(e) => setSel({ ...sel, db: e.target.value })}>
             {/* Keep the selected db listed even if listing databases failed. */}

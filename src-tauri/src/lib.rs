@@ -65,7 +65,8 @@ type FkMap = HashMap<(u32, i16), FkTarget>;
 #[derive(Default)]
 struct AppState {
     /// Keyed by (connection name, database).
-    clients: Mutex<HashMap<(String, String), Arc<Client>>>,
+    /// Each client comes with its connection task, so a reset can abort it.
+    clients: Mutex<HashMap<(String, String), (Arc<Client>, tauri::async_runtime::JoinHandle<()>)>>,
     /// Keyed by (connection name, database). Refreshed whenever the sidebar lists that
     /// database's tables; kept across reconnects, dropped when the app exits.
     fks: std::sync::Mutex<HashMap<(String, String), Arc<FkMap>>>,
@@ -122,7 +123,7 @@ fn load_config() -> Result<Vec<ConnectionConfig>, String> {
 async fn client(state: &AppState, name: &str, database: &str) -> Result<Arc<Client>, String> {
     let key = (name.to_string(), database.to_string());
     let mut clients = state.clients.lock().await;
-    if let Some(c) = clients.get(&key) {
+    if let Some((c, _)) = clients.get(&key) {
         if !c.is_closed() {
             return Ok(c.clone());
         }
@@ -138,6 +139,9 @@ async fn client(state: &AppState, name: &str, database: &str) -> Result<Arc<Clie
         .user(&cfg.user)
         .dbname(database)
         .application_name("jerrys-db-viewer")
+        // Bounded, because the clients lock is held while connecting (an unreachable host
+        // would otherwise block every other query and the reset).
+        .connect_timeout(std::time::Duration::from_secs(10))
         .ssl_mode(match cfg.sslmode {
             SslMode::Disable => tokio_postgres::config::SslMode::Disable,
             SslMode::Prefer => tokio_postgres::config::SslMode::Prefer,
@@ -153,15 +157,30 @@ async fn client(state: &AppState, name: &str, database: &str) -> Result<Arc<Clie
         .map_err(|e| e.to_string())?;
 
     let (client, connection) = pg.connect(MakeTlsConnector::new(tls)).await.map_err(|e| e.to_string())?;
-    tauri::async_runtime::spawn(async move {
+    let task = tauri::async_runtime::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("connection error: {e}");
         }
     });
 
     let client = Arc::new(client);
-    clients.insert(key, client.clone());
+    clients.insert(key, (client.clone(), task));
     Ok(client)
+}
+
+/// Drops every open connection; the next query on each reconnects. Aborting the connection
+/// task closes the socket, so queries stuck on a dead connection (e.g. after a network change,
+/// where the client doesn't notice it's closed) fail right away instead of hanging.
+async fn reset(state: &AppState) {
+    for (_, (_, task)) in state.clients.lock().await.drain() {
+        task.abort();
+    }
+}
+
+#[tauri::command]
+async fn reset_connections(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    reset(&state).await;
+    Ok(())
 }
 
 /// Runs SQL via the simple query protocol, so every value comes back as text
@@ -573,6 +592,8 @@ struct Relations {
     /// Per result column, the queried table's column it reads directly, or null (computed,
     /// or the query couldn't be described). Lets the UI read FK values from a selected row.
     result_columns: Vec<Option<String>>,
+    /// Per result column, its name in the results (the alias, if any); for joining onto them.
+    result_names: Vec<String>,
 }
 
 /// FK relations of the single table `sql` reads (a self-join counts as one table). Two round
@@ -643,16 +664,18 @@ async fn relations_of(state: &AppState, connection: &str, database: &str, sql: &
     };
     // Map result columns onto the table via describe (table oid + attnum); empty if describe failed.
     let oid: Option<u32> = attrs.first().and_then(|r| v(r, 0).parse().ok());
-    let result_columns = match stmt {
-        Ok(stmt) => stmt
-            .columns()
-            .iter()
-            .map(|c| {
-                (c.table_oid()? == oid?)
-                    .then(|| attrs.iter().find(|a| v(a, 1).parse::<i16>().ok() == c.column_id()).map(|a| v(a, 2)))?
-            })
-            .collect(),
-        Err(_) => Vec::new(),
+    let (result_columns, result_names) = match stmt {
+        Ok(stmt) => (
+            stmt.columns()
+                .iter()
+                .map(|c| {
+                    (c.table_oid()? == oid?)
+                        .then(|| attrs.iter().find(|a| v(a, 1).parse::<i16>().ok() == c.column_id()).map(|a| v(a, 2)))?
+                })
+                .collect(),
+            stmt.columns().iter().map(|c| c.name().to_string()).collect(),
+        ),
+        Err(_) => (Vec::new(), Vec::new()),
     };
     Ok(Relations {
         schema,
@@ -660,6 +683,7 @@ async fn relations_of(state: &AppState, connection: &str, database: &str, sql: &
         parents: parents.iter().map(relation).collect(),
         children: children.iter().map(relation).collect(),
         result_columns,
+        result_names,
     })
 }
 
@@ -792,6 +816,7 @@ mod tests {
         let up = &r.parents[0];
         assert_eq!((up.table.as_str(), up.cols.clone(), up.other_cols.clone()), ("dbv_parent", vec!["parent_id".to_string()], vec!["pid".to_string()]));
         assert_eq!(r.result_columns, vec![Some("parent_id".to_string()), None], "aliases map back; computed is null");
+        assert_eq!(r.result_names, ["p", "?column?"]);
         assert!(relations_of(&state, "t", "postgres", "SELECT * FROM dbv_child c JOIN dbv_parent p ON p.pid = c.parent_id").await.is_err());
         assert_eq!(relations_of(&state, "t", "postgres", "SELECT 1").await.unwrap_err(), "No tables referenced.");
         // ON DELETE actions; a partitioned child's FK appears once (not per partition); other schemas.
@@ -866,6 +891,18 @@ mod tests {
         assert!(!Arc::ptr_eq(&c, &other));
         let sets = simple_query(&other, "SELECT current_database()").await.unwrap();
         assert_eq!(sets[0].rows, vec![vec![Some("dbv_other".into())]]);
+
+        // Reset closes every connection (in-flight queries fail rather than hang); the next use reconnects.
+        let slow = tokio::spawn({
+            let c = c.clone();
+            async move { simple_query(&c, "SELECT pg_sleep(30)").await }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        reset(&state).await;
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), slow).await.unwrap().unwrap().is_err());
+        let fresh = client(&state, "t", "postgres").await.unwrap();
+        assert!(!Arc::ptr_eq(&c, &fresh));
+        assert_eq!(simple_query(&fresh, "SELECT 1").await.unwrap()[0].rows, vec![vec![Some("1".into())]]);
     }
 }
 
@@ -888,7 +925,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, table_relations, edit_context, run_query])
+        .invoke_handler(tauri::generate_handler![list_connections, list_databases, list_tables, describe_columns, tables_info, table_relations, edit_context, run_query, reset_connections])
         .run(context)
         .expect("error while running tauri application");
 }

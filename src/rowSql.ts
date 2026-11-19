@@ -137,7 +137,27 @@ export type Relation = {
 };
 
 /** From the backend's table_relations. */
-export type Relations = TableRef & { parents: Relation[]; children: Relation[]; resultColumns: ResultColumns };
+export type Relations = TableRef & {
+  parents: Relation[];
+  children: Relation[];
+  resultColumns: ResultColumns;
+  /** Per result column, its name in the results (the alias, if any). */
+  resultNames: string[];
+};
+
+/**
+ * `sql`'s rows LEFT JOINed to the other table of `rel` (a row repeats once per match), or why it
+ * can't be built. Wraps `sql` as a subquery, so its WHERE / ORDER BY / LIMIT still pick the rows.
+ */
+export function joinQuery(rel: Relation, columns: ResultColumns, names: string[], sql: string): { sql: string } | { error: string } {
+  const blocked = relationBlocked(rel, columns);
+  if (blocked) return { error: blocked };
+  const base = sql.replace(/[;\s]+$/, "");
+  // A line comment in the query would swallow a closing paren on the same line.
+  const nl = /--|\n/.test(base) ? "\n" : "";
+  const on = rel.cols.map((c, i) => `j.${quoteIdent(rel.otherCols[i])} = t.${quoteIdent(names[columns.indexOf(c)])}`).join(" AND ");
+  return { sql: `SELECT * FROM (${nl}${base}${nl}) AS t LEFT JOIN ${qualified(rel)} AS j ON ${on} LIMIT ${DEFAULT_LIMIT}` };
+}
 
 /** Why a relation can never be followed from these results, or null if it can. */
 export function relationBlocked(rel: Relation, columns: ResultColumns): string | null {

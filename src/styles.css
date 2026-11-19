@@ -53,7 +53,13 @@ body { background: var(--bg); color: var(--fg); }
 
 .sidebar select { margin: 8px; padding: 4px; font: inherit; }
 
-.sidebar select + select { margin-top: 0; }
+.conn-row { display: flex; align-items: center; }
+
+.conn-row select { flex: 1; min-width: 0; }
+
+.conn-row button { margin-right: 8px; padding: 2px 6px; font: inherit; }
+
+.conn-row + select { margin-top: 0; }
 
 .tables { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
 
@@ -317,5 +323,10 @@ td[data-sel] { background: color-mix(in srgb, Highlight 45%, transparent); }
 .relations .rel-arrow { opacity: 0.35; cursor: default; }
 
 .pane[data-has-sel] .relations .rel-arrow.ok { opacity: 1; text-decoration: underline; cursor: pointer; }
+
+/* The join button doesn't depend on a selection. */
+.relations .rel-join { opacity: 0.35; cursor: default; }
+
+.relations .rel-join.ok { opacity: 1; cursor: pointer; }
 
 .relations .rel-note { margin-top: 8px; color: var(--error); }

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deleteSql, editRowSql, insertSql, pickKey, placeholder, relatedQuery, relationBlocked, updateSql, type ColumnMeta, type TableMeta } from "./rowSql.ts";
+import { deleteSql, editRowSql, insertSql, joinQuery, pickKey, placeholder, relatedQuery, relationBlocked, updateSql, type ColumnMeta, type TableMeta } from "./rowSql.ts";
 
 const col = (name: string, o: Partial<ColumnMeta> = {}): ColumnMeta => ({
   name,
@@ -129,6 +129,19 @@ test("relatedQuery follows an FK from the selected row in either direction", () 
   assert.deepEqual(relatedQuery(parent, cols, ["a1", "u'7", "x"]), { sql: `SELECT * FROM "public"."users" WHERE "id" = 'u''7' LIMIT 420` });
   assert.deepEqual(relatedQuery(child, cols, ["a1", "u7", "x"]), { sql: `SELECT * FROM "app"."rooms" WHERE "origin_account_id" = 'a1' LIMIT 420` });
   assert.deepEqual(relatedQuery(parent, cols, ["a1", null, "x"]), { error: "The selected row has NULL userId, so nothing is linked" });
+});
+
+test("joinQuery left-joins the whole query to the related table, using result names", () => {
+  const parent = { constraint: "f1", schema: "public", table: "users", cols: ["userId"], otherCols: ["id"], onDelete: null };
+  // SELECT "accountId", "userId" AS u FROM accounts
+  assert.deepEqual(joinQuery(parent, ["accountId", "userId"], ["accountId", "u"], `SELECT "accountId", "userId" AS u FROM accounts LIMIT 5; `), {
+    sql: `SELECT * FROM (SELECT "accountId", "userId" AS u FROM accounts LIMIT 5) AS t LEFT JOIN "public"."users" AS j ON j."id" = t."u" LIMIT 420`,
+  });
+  const comp = { constraint: "f", schema: "s", table: "t", cols: ["a", "b"], otherCols: ["x", "y"], onDelete: null };
+  assert.deepEqual(joinQuery(comp, ["b", "a"], ["b", "a"], "select * from k -- all"), {
+    sql: `SELECT * FROM (\nselect * from k -- all\n) AS t LEFT JOIN "s"."t" AS j ON j."x" = t."a" AND j."y" = t."b" LIMIT 420`,
+  });
+  assert.deepEqual(joinQuery(comp, ["a"], ["a"], "select a from k"), { error: "The results don't include b" });
 });
 
 test("composite FKs AND their columns; missing columns block the relation", () => {

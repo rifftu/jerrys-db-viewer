@@ -208,8 +208,8 @@ export const BottomPanel = memo(function BottomPanel({
       )}
       {!collapsed &&
         panel === "relations" &&
-        (relations && "value" in relations && target ? (
-          <RelationsView rels={relations.value} getSelection={getSelection} onOpen={(table, sql) => onOpenTab(target, table, sql)} />
+        (relations && "value" in relations && target && lastSql ? (
+          <RelationsView rels={relations.value} sql={lastSql}getSelection={getSelection} onOpen={(table, sql) => onOpenTab(target, table, sql)} />
         ) : (
           <pre className="bottom-body info-dump">
             {!lastSql ? "Run a query to see its tables." : !relations ? "Loading…" : "error" in relations ? relations.error : ""}
